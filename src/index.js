@@ -405,7 +405,7 @@ export default {
             if (b.type === 'webhook') { key = 'cx_' + rid() + rid(); keyHash = await sha256(key); }
             await env.DB.prepare('INSERT INTO connectors (tenant_id, id, type, name, source_id, config_json, secret_enc, key_hash, status, schedule_minutes, created_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
               .bind(tid, id, b.type, String(b.name || TYPES[b.type].label).slice(0, 80), srcRow.id, JSON.stringify(cfg), secretEnc, keyHash, waiting ? 'pausado' : 'ativo', Math.max(TYPES[b.type].minSchedule || 15, Math.min(1440, +b.schedule_minutes || 60)), now(), user.email).run();
-            if (b.mapping && typeof b.mapping === 'object') { const m = {}; Object.entries(b.mapping).forEach(([h, f]) => { m[String(h).slice(0, 120)] = f && (globalThis.CX.F[f] || /^x_[a-z0-9]{1,40}$/.test(f)) ? f : null; }); await env.DB.prepare('UPDATE connectors SET mapping_json = ? WHERE tenant_id = ? AND id = ?').bind(JSON.stringify(m), tid, id).run(); }
+            if (b.mapping && typeof b.mapping === 'object') { const m = {}; Object.entries(b.mapping).forEach(([h, f]) => { m[String(h).slice(0, 120)] = f && (globalThis.CX.F[f] || globalThis.CX.isOriginField(f) || /^x_[a-z0-9]{1,40}$/.test(f)) ? f : null; }); await env.DB.prepare('UPDATE connectors SET mapping_json = ? WHERE tenant_id = ? AND id = ?').bind(JSON.stringify(m), tid, id).run(); }
             if (waiting) await env.DB.prepare('UPDATE connectors SET last_error = ? WHERE tenant_id = ? AND id = ?').bind('Aguardando a chave de acesso: use Informar credencial.', tid, id).run();
             await audit(env, tid, user.email, 'conector_criado', TYPES[b.type].label + ' · ' + (b.name || ''), id);
             return json({ ok: true, id, key, endpoint: b.type === 'webhook' ? 'https://' + (env.INGEST_HOST || 'ingest.connextintelligence.com') + '/in/' + tid + '/' + id : null });
@@ -421,7 +421,7 @@ export default {
             }
             if (action === 'sync' && req.method === 'POST') return json(Object.assign({ ok: true }, await runConnector(env, tid, c, user.email)));
             if (action === 'mapping' && req.method === 'POST') {
-              const b = await req.json(); const m = {}; Object.entries(b.mapping || {}).forEach(([h, f]) => { m[String(h).slice(0, 120)] = f && (globalThis.CX.F[f] || /^x_[a-z0-9]{1,40}$/.test(f)) ? f : null; });
+              const b = await req.json(); const m = {}; Object.entries(b.mapping || {}).forEach(([h, f]) => { m[String(h).slice(0, 120)] = f && (globalThis.CX.F[f] || globalThis.CX.isOriginField(f) || /^x_[a-z0-9]{1,40}$/.test(f)) ? f : null; });
               await env.DB.prepare('UPDATE connectors SET mapping_json = ? WHERE tenant_id = ? AND id = ?').bind(JSON.stringify(m), tid, cid).run();
               await audit(env, tid, user.email, 'conector_mapeamento', c.name, c.id);
               return json({ ok: true });

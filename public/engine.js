@@ -40,11 +40,14 @@ CX.FIELDS = [
   { k: 'created_at', label: 'Data de captura', cat: 'Metadado', sens: 'baixo', ttl: 0, syn: ['data', 'datacadastro', 'createdat', 'criadoem', 'datacaptura', 'timestamp', 'dtcadastro'] }
 ];
 CX.F = {}; CX.FIELDS.forEach(f => CX.F[f.k] = f);
+// metadados de origem: vão para a tag de origem de cada registro, não para atributos do lead
+CX.ORIGIN_FIELDS = [['@proprietario', 'Proprietário dos dados'], ['@fonte', 'Fonte declarada na origem'], ['@id_origem', 'ID do registro na origem'], ['@atualizado_origem', 'Atualizado na origem em']];
+CX.isOriginField = k => typeof k === 'string' && k[0] === '@' && CX.ORIGIN_FIELDS.some(o => o[0] === k);
 /* ---------- campos personalizados (criados na importação, prefixo x_) ---------- */
 CX.isCustom = k => typeof k === 'string' && k.slice(0, 2) === 'x_';
 CX.customKey = label => 'x_' + ((compact(label || '').replace(/[^a-z0-9]/g, '')) || 'campo').slice(0, 40);
 CX.customField = (t, k) => ((t && t.customFields) || []).find(c => c.k === k) || null;
-CX.fieldLabel = (t, k) => CX.F[k] ? CX.F[k].label : (CX.customField(t, k) || {}).label || String(k || '').replace(/^x_/, '');
+CX.fieldLabel = (t, k) => CX.F[k] ? CX.F[k].label : CX.isOriginField(k) ? CX.ORIGIN_FIELDS.find(o => o[0] === k)[1] : (CX.customField(t, k) || {}).label || String(k || '').replace(/^x_/, '');
 CX.inferType = function (vals) {
   const v = (vals || []).map(x => String(x).trim()).filter(Boolean).slice(0, 200); if (!v.length) return 'texto';
   const share = re => v.filter(x => re.test(x)).length / v.length;
@@ -56,7 +59,7 @@ CX.inferType = function (vals) {
   return 'texto';
 };
 // nome digitado ou sugerido -> campo que já existe na base (canônico ou personalizado), para nunca duplicar
-const NAME_ALIAS = { primeironome: 'full_name', sobrenome: 'full_name', ultimonome: 'full_name', nome: 'full_name', firstname: 'full_name', lastname: 'full_name', surname: 'full_name', email: 'email', emails: 'email', telefone: 'phone', celular: 'phone', whatsapp: 'phone', fone: 'phone' };
+const NAME_ALIAS = { proprietario: '@proprietario', proprietariodosdados: '@proprietario', owner: '@proprietario', fonte: '@fonte', fontedeclarada: '@fonte', idorigem: '@id_origem', idnaorigem: '@id_origem', primeironome: 'full_name', sobrenome: 'full_name', ultimonome: 'full_name', nome: 'full_name', firstname: 'full_name', lastname: 'full_name', surname: 'full_name', email: 'email', emails: 'email', telefone: 'phone', celular: 'phone', whatsapp: 'phone', fone: 'phone' };
 CX.matchFieldByName = function (t, name) {
   const c = compact(name || ''); if (!c) return null;
   for (const f of CX.FIELDS) if (compact(f.label) === c || f.syn.includes(c)) return f.k;
@@ -279,6 +282,7 @@ CX.parseBytes = function (name, u8) {
 };
 
 /* ---------- mapeamento inteligente ---------- */
+const ORIGIN_SYN = { proprietario: '@proprietario', owner: '@proprietario', fonte: '@fonte', source: '@fonte', id: '@id_origem', uuid: '@id_origem', idexterno: '@id_origem', externalid: '@id_origem', updatedat: '@atualizado_origem', atualizadoem: '@atualizado_origem', dataatualizacao: '@atualizado_origem', lastmodified: '@atualizado_origem' };
 const PATTERN_ORDER = ['email', 'cnpj', 'cpf', 'phone', 'cep', 'state', 'created_at', 'website', 'consent'];
 CX.suggestMapping = function (t, headers, rows) {
   const sig = hash(headers.map(compact).sort().join('|')), saved = t && t.mappings[sig];
@@ -288,6 +292,7 @@ CX.suggestMapping = function (t, headers, rows) {
       const vals = sample.map(r => r[i]).filter(v => v !== '' && v != null), ch = compact(h), samples = vals.slice(0, 3).map(String);
       if (SENSITIVE.test(ch)) return { col: i, header: h, field: null, confidence: 0, basis: 'atributo sensível, excluído da importação', samples, sensitive: true };
       if (saved && saved.map[h] !== undefined) return { col: i, header: h, field: saved.map[h], confidence: 1, basis: 'mapeamento aprovado anteriormente', samples };
+      if (ORIGIN_SYN[ch]) return { col: i, header: h, field: ORIGIN_SYN[ch], confidence: 0.95, basis: 'metadado de origem do registro', samples };
       let syn = null, sc = 0;
       for (const f of CX.FIELDS) for (const s of f.syn) { const c = ch === s ? 0.95 : (s.length >= 4 && ch.includes(s) ? 0.72 : (ch.length >= 4 && s.includes(ch) ? 0.6 : 0)); if (c > sc) { sc = c; syn = f.k; } }
       let pat = null, pc = 0;
@@ -375,7 +380,7 @@ CX.beginImport = function (t, m) {
   if (prev) { CX.audit(t, m.actor || 'sistema', 'importacao_idempotente', prev.id); return { skipped: true, job: prev, reason: 'Arquivo idêntico já importado nesta fonte (' + prev.id + '). Nenhum registro duplicado foi criado.' }; }
   const version = t.imports.filter(i => i.fileName === m.fileName && i.sourceId === m.sourceId).length + 1;
   const src0 = t.sources.find(s => s.id === m.sourceId);
-  const job = { origin: { source_id: m.sourceId, source_name: src0 ? src0.name : m.sourceId, import_id: null, file: m.fileName, by: m.actor || 'sistema', channel: 'arquivo', at: m.at || CX.now() }, id: 'imp_' + (t.idp || '') + (t.imports.length + 1), sourceId: m.sourceId, fileName: m.fileName, fileHash: m.fileHash, format: m.format, encoding: m.encoding, bytes: m.bytes || 0, version, at: m.at || CX.now(), actor: m.actor || 'sistema', status: 'processando', mapping: m.mapping, total: m.total || 0, cursor: 0, parseErrors: m.parseErrors || [], rowErrors: [], st: { received: (m.total || 0) + (m.parseErrors || []).filter(e => !e.warn).length, extracted: m.total || 0, mapped: 0, normalized: 0, validated: 0 }, ms: { extract: m.msExtract || 0, normalize: 0, resolve: 0 }, recIds: [] };
+  const job = { origin: { source_id: m.sourceId, source_name: src0 ? src0.name : m.sourceId, proprietario: src0 ? src0.owner || null : null, import_id: null, file: m.fileName, by: m.actor || 'sistema', channel: 'arquivo', at: m.at || CX.now() }, id: 'imp_' + (t.idp || '') + (t.imports.length + 1), sourceId: m.sourceId, fileName: m.fileName, fileHash: m.fileHash, format: m.format, encoding: m.encoding, bytes: m.bytes || 0, version, at: m.at || CX.now(), actor: m.actor || 'sistema', status: 'processando', mapping: m.mapping, total: m.total || 0, cursor: 0, parseErrors: m.parseErrors || [], rowErrors: [], st: { received: (m.total || 0) + (m.parseErrors || []).filter(e => !e.warn).length, extracted: m.total || 0, mapped: 0, normalized: 0, validated: 0 }, ms: { extract: m.msExtract || 0, normalize: 0, resolve: 0 }, recIds: [] };
   job.origin.import_id = job.id; if (m.columnNames) job.columnNames = m.columnNames; t.imports.push(job);
   if (m.sig) t.mappings[m.sig] = { map: m.headerMap || {}, at: CX.now(), used: (t.mappings[m.sig] ? t.mappings[m.sig].used : 0) + 1, fileName: m.fileName };
   return { job };
@@ -389,6 +394,7 @@ CX.processChunk = function (t, job, rows, start, end) {
     let any = false, anyValid = false;
     for (const c in map) {
       const field = map[c], v = arr[c]; if (!field || v === '' || v == null) continue;
+      if (CX.isOriginField(field)) { if (rec.origin === job.origin) rec.origin = Object.assign({}, job.origin); rec.origin[field.slice(1)] = String(v).trim().slice(0, 200); continue; }
       const prev = JOIN[field] && rec.f[field] && rec.f[field].find(x => x.row === i);
       if (prev) { const raw = prev.raw + JOIN[field] + String(v).trim(), n = CX.normalize(field, raw); Object.assign(prev, n, { raw, cols: (prev.cols || [prev.col]).concat(+c) }); if (n.valid) anyValid = true; if (INJECTION.test(raw)) { rec.flags = rec.flags || {}; rec.flags.injection = true; } continue; }
       const n = CX.isCustom(field) ? nCustom(v) : CX.normalize(field, v); n.raw = String(v); n.col = +c; if (JOIN[field]) n.row = i; (rec.f[field] = rec.f[field] || []).push(n); any = true; if (n.valid) anyValid = true;
@@ -731,6 +737,7 @@ CX.selfTest = function () {
   T('17 · Reconstrução do Golden Record', () => { const t = mk(); imp(t, 'nome,email,telefone\nAna Lima,ana@acme.example,(11) 98888-7777\nAna Lima,ana@acme.example,\nBia Souza,bia@acme.example,(21) 97777-6666'); CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['ddd_uf']); const s1 = CX.signature(t); t.derived = null; CX.rebuild(t); return { ok: CX.signature(t) === s1, detail: 'perfis idênticos após reconstrução a partir de registros, decisões e evidências' }; });
   T('18 · Registro de custos e auditoria', () => { const t = mk(); t.config.budget.enrichMonthly = 10; imp(t, 'nome,email\nAna Lima,ana@acme.example'); const run = CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['demo_b2b']); const p = t.derived.profiles[0]; return { ok: run.cost === 0.35 && t.spend === 0.35 && t.audit.some(a => a.action === 'enriquecimento_executado') && p.fields.job_title.synthetic === true && p.scores.completeness === 36, detail: 'custo R$ 0,35 registrado, valor sintético fora dos indicadores' }; });
   T('19 · Classificação de etapa do funil', () => { const t = mk(); imp(t, 'nome,email,status,observacoes\nAna Lima,ana@acme.example,Closed Won,\nBia Souza,bia@acme.example,Proposta enviada,\nCaio Dias,caio@acme.example,,Pediu retorno em março\nDani Reis,dani@acme.example,,'); const st = n => t.derived.profiles.find(p => p.name === n).stage; return { ok: st('Ana Lima').stage === 'cliente' && st('Bia Souza').stage === 'negociacao' && st('Caio Dias').needsAI && !st('Dani Reis').needsAI, detail: 'regras resolvem status conhecidos; observações livres vão para a IA' }; });
+  T('23 · Proprietário e fonte na tag de origem', () => { const t = mk(); t.sources[0].owner = 'Alpha FM'; const p = CX.parseText('a.json', JSON.stringify([{ id: 'u1', proprietario: 'Alpha FM', fonte: 'crm_ouvintes', nome: 'Ana Lima', email: 'ana@acme.example', updated_at: '2026-11-26T03:15:00Z' }])); const ix = h => p.headers.indexOf(h); const mapping = {}; mapping[ix('id')] = '@id_origem'; mapping[ix('proprietario')] = '@proprietario'; mapping[ix('fonte')] = '@fonte'; mapping[ix('nome')] = 'full_name'; mapping[ix('email')] = 'email'; mapping[ix('updated_at')] = '@atualizado_origem'; CX.importSync(t, { sourceId: t.sources[0].id, fileName: 'a.json', fileHash: 'h23', format: 'JSON', encoding: 'UTF-8', at: CX.now(), actor: 'teste', mapping, headerMap: {}, sig: 'z' }, p.rows); const o = t.records[0].origin; return { ok: o.proprietario === 'Alpha FM' && o.fonte === 'crm_ouvintes' && o.id_origem === 'u1' && o.atualizado_origem === '2026-11-26T03:15:00Z' && !t.records[0].f.x_idorigem, detail: 'proprietário, fonte, ID e data de atualização da origem gravados na tag de cada registro' }; });
   T('22 · Nome de coluna ligado ao campo da base', () => { const t = mk(); CX.addCustomField(t, 'MAC', 'teste'); const p = CX.parseText('s.csv', 'Eric,Silva,eric@acme.example\nLeticia,Chuder,leticia@acme.example\nCris,Alves,cris@acme.example'); const sug = CX.suggestMapping(t, p.headers, p.rows); const m = n => CX.matchFieldByName(t, n); return { ok: m('Primeiro nome') === 'full_name' && m('E-mail') === 'email' && m('Celular') === 'phone' && m('mac') === 'x_mac' && m('Local de captura') === null && sug.cols[0].field === 'full_name' && sug.cols[1].field === 'full_name' && sug.cols[2].field === 'email', detail: 'nomes e colunas sem cabeçalho reconhecidos como campos existentes, sem criar duplicados' }; });
   T('21 · Primeiro nome e sobrenome em colunas separadas', () => { const t = mk(), p = CX.parseText('n.csv', 'Eric,Silva,eric@acme.example\nLeticia,Chuder,leticia@acme.example'); CX.importSync(t, { sourceId: t.sources[0].id, fileName: 'n.csv', fileHash: 'h21', format: 'CSV', encoding: 'UTF-8', at: CX.now(), actor: 'teste', mapping: { 0: 'full_name', 1: 'full_name', 2: 'email' }, headerMap: {}, sig: 'y' }, p.rows); const names = t.derived.profiles.map(x => x.name).sort(); return { ok: names[0] === 'Eric Silva' && names[1] === 'Leticia Chuder' && p.headers[0] === 'coluna_1', detail: 'arquivo sem cabeçalho reconhecido e colunas de nome unidas em Nome completo' }; });
   T('20 · Campo personalizado criado na importação', () => {

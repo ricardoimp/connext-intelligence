@@ -1,11 +1,22 @@
 /* Cofre simples: credenciais de conectores cifradas com AES-GCM.
-   A chave vem do segredo VAULT_KEY do Worker e nunca é gravada no banco. */
+   A chave nunca é gravada no banco de dados (veja material()). */
 const enc = new TextEncoder(), dec = new TextDecoder();
 const b64 = u8 => btoa(String.fromCharCode(...u8));
 const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+// chave do cofre: segredo VAULT_KEY do Worker, quando configurado; senão, chave aleatória de 256 bits gerada pelo
+// próprio servidor na primeira vez e guardada no bucket privado (fora do banco de dados onde ficam as credenciais cifradas)
+const KEY_OBJ = '_sistema/cofre/chave-v1';
+let cached = null;
+async function material(env) {
+  if (env.VAULT_KEY && String(env.VAULT_KEY).length >= 16) return enc.encode(env.VAULT_KEY);
+  if (cached) return cached;
+  let o = await env.RAW.get(KEY_OBJ);
+  if (!o) { const k = crypto.getRandomValues(new Uint8Array(32)); await env.RAW.put(KEY_OBJ, k, { onlyIf: { etagDoesNotMatch: '*' }, customMetadata: { uso: 'chave do cofre de credenciais', criada_em: new Date().toISOString() } }); o = await env.RAW.get(KEY_OBJ); }
+  if (!o) throw Object.assign(new Error('Não foi possível preparar a chave do cofre.'), { status: 500 });
+  cached = new Uint8Array(await o.arrayBuffer()); return cached;
+}
 async function key(env) {
-  if (!env.VAULT_KEY || String(env.VAULT_KEY).length < 16) throw Object.assign(new Error('O segredo VAULT_KEY não está configurado no servidor (mínimo de 16 caracteres).'), { status: 412 });
-  const raw = await crypto.subtle.digest('SHA-256', enc.encode(env.VAULT_KEY));
+  const raw = await crypto.subtle.digest('SHA-256', await material(env));
   return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 export async function seal(env, text) {
