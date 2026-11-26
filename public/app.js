@@ -15,9 +15,13 @@ const SCORES = [['completeness', 'Completeness'], ['confidence', 'Confidence'], 
 
 /* ---------- estado ---------- */
 const store = CX.createStore();
-store.tenants['connext-demo'] = CX.loadDemo(CX.newTenant('connext-demo', 'Connext · demonstração'));
-CX.runEnrichment(store.tenants['connext-demo'], store.tenants['connext-demo'].derived.profiles.map(p => p.id), ['ddd_uf', 'master_link', 'domain_site'], { actor: 'agente:orquestrador', trigger: 'Carga inicial' });
-store.tenants['operacao-b'] = CX.newTenant('operacao-b', 'Operação B · vazia');
+// demonstração local: só é montada quando não há login ou o usuário não pertence a nenhuma organização
+function makeDemo(hosted) {
+  store.tenants['connext-demo'] = CX.loadDemo(CX.newTenant('connext-demo', hosted ? 'Demonstração local · dados sintéticos' : 'Connext · demonstração'));
+  CX.runEnrichment(store.tenants['connext-demo'], store.tenants['connext-demo'].derived.profiles.map(p => p.id), ['ddd_uf', 'master_link', 'domain_site'], { actor: 'agente:orquestrador', trigger: 'Carga inicial' });
+  if (!hosted) store.tenants['operacao-b'] = CX.newTenant('operacao-b', 'Operação B · vazia');
+}
+function splash(msg, frac) { const t = document.getElementById('spl-t'), b = document.getElementById('spl-bar'); if (t) t.textContent = msg; if (b) { if (frac == null) b.classList.add('ind'); else { b.classList.remove('ind'); b.firstChild.style.width = Math.round(Math.min(1, frac) * 100) + '%'; } } }
 const S = { tenant: 'connext-demo', role: 'admin', view: 'overview', f: { source: '', type: '', level: '', days: 0 }, lead: null, cand: 0, imp: null, run: null, queue: [], q: '', sort: 'dqi', seg: { name: 'Decisores com e-mail corporativo', purpose: 'sales_contact', op: 'AND', rules: [{ field: 'level', cmp: '>=', value: '3' }, { field: 'email_type', cmp: '=', value: 'corporativo' }, { field: 'qualification', cmp: '>=', value: '40' }] }, tests: null, ai: { out: '', busy: false, log: [] }, newSrc: false, eraseArm: null };
 let sampleFn = null, downloads = null;
 Object.assign(S, { conns: {}, connTest: null, connNew: false, connType: 'webhook', connKey: null, aiUsage: {}, stageRun: null, hosted: false, me: null, canCreate: false, members: {}, pendingRaw: [], syncing: false, syncAgain: false, syncState: { s: '', msg: '' } });
@@ -496,7 +500,7 @@ const ACT = {
   stageRun() { runStageAI(false); },
   stageSet(el) { setStage(el.dataset.v); },
   reloadTenant() { reloadTenant(); },
-  resetDemo() { if (!guard('config')) return; store.tenants['connext-demo'] = CX.loadDemo(CX.newTenant('connext-demo', 'Connext · demonstração')); S.lead = null; toast('Dados de demonstração restaurados.'); rerender(); }
+  resetDemo() { if (!guard('config')) return; makeDemo(S.hosted); S.lead = null; toast('Dados de demonstração restaurados.'); rerender(); }
 };
 function setTenant(id) { const nt = store.tenants[id]; if (nt && nt.remote) S.role = nt.role; else if (S.hosted) S.role = 'admin'; S.tenant = id; S.f = { source: '', type: '', level: '', days: 0 }; S.lead = null; S.imp = null; S.cand = 0; render(); }
 const CH = {
@@ -767,20 +771,20 @@ window.addEventListener('beforeunload', e => { if (S.hosted && (S.syncing || syn
 
 async function boot() {
   const ses = window.CXSync ? await CXSync.init() : null;
-  if (ses && ses.status === 401) { S.hosted = true; route(); $('#main').innerHTML = `<div class="card note crit">${esc(ses.error)}</div>`; return; }
+  splash('Verificando acesso');
+  if (ses && ses.status === 401) { S.hosted = true; makeDemo(true); document.body.classList.remove('booting'); route(); $('#main').innerHTML = `<div class="card note crit">${esc(ses.error)}</div>`; return; }
   if (ses && ses.ok) {
     S.hosted = true; S.me = ses.email; S.canCreate = ses.canCreateTenants;
-    delete store.tenants['operacao-b']; store.tenants['connext-demo'].name = 'Demonstração local · dados sintéticos';
-    renderNav(); renderTop();
     for (const m of ses.tenants) {
-      $('#main').innerHTML = `<div class="card empty"><p>Carregando <b>${esc(m.name)}</b> do banco de dados.</p><p class="mono muted" id="boot-p"></p></div>`;
-      try { const t = await CXSync.loadTenant(m.id, m.role, (got, total) => { const el = $('#boot-p'); if (el) el.textContent = fmt(got) + ' de ' + fmt(total) + ' registros'; }); store.tenants[t.id] = t; }
+      splash('Carregando ' + m.name);
+      try { const t = await CXSync.loadTenant(m.id, m.role, (got, total) => { splash('Carregando ' + m.name + ' · ' + fmt(got) + ' de ' + fmt(total) + ' registros', total ? got / total : null); if (got >= total) splash('Preparando os perfis de ' + m.name); }); store.tenants[t.id] = t; }
       catch (e) { toast('Não foi possível carregar ' + m.name + ': ' + e.message, true); }
     }
     const first = ses.tenants.find(m => store.tenants[m.id]);
     if (first) { S.tenant = first.id; S.role = first.role; }
-    else toast('O e-mail ' + ses.email + ' ainda não pertence a nenhuma organização. Peça a um administrador para adicioná-lo. Enquanto isso, você vê só a demonstração local.', true);
-  }
+    else { makeDemo(true); toast('O e-mail ' + ses.email + ' ainda não pertence a nenhuma organização. Peça a um administrador para adicioná-lo. Enquanto isso, você vê só a demonstração local.', true); }
+  } else makeDemo(false);
+  document.body.classList.remove('booting');
   route();
 }
 boot();
