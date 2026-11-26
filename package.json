@@ -1,0 +1,10 @@
+{
+  "name": "connext-intelligence",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Connext Intelligence Platform",
+  "scripts": {
+    "test": "node tests/selftest.js",
+    "deploy": "wrangler deploy"
+  }
+}

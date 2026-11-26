@@ -1,0 +1,12 @@
+{
+  // Connext Intelligence: site estatico servido por Cloudflare Workers (static assets)
+  "name": "connext-intelligence",
+  "compatibility_date": "2026-11-18",
+  "assets": { "directory": "./public" },
+  // Sem enderecos publicos alternativos: so o dominio protegido pelo Access responde
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "plataforma.connextintelligence.com", "custom_domain": true }
+  ]
+}
