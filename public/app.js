@@ -127,8 +127,9 @@ function srcStats(t) {
 }
 function weekly(t) {
   const recs = t.records.filter(r => !S.f.source || r.source_id === S.f.source); if (!recs.length) return { labels: [], series: [] };
-  const wk = ms => Math.floor(ms / (7 * DAY)), a = Math.min(...recs.map(r => wk(r.observed_at))), b = wk(CX.now()), labels = [], idx = {}; t.sources.forEach(s => idx[s.id] = new Array(b - a + 1).fill(0));
-  for (let w = a; w <= b; w++) labels.push(dt(w * 7 * DAY).slice(0, 5));
+  // mínimo em laço: Math.min(...lista) estoura a pilha acima de ~100 mil registros
+  const wk = ms => Math.floor(ms / (7 * DAY)); let a = Infinity; for (const r of recs) { const w = wk(r.observed_at); if (w < a) a = w; } const b = wk(CX.now()), labels = [], idx = {}; if (!isFinite(a) || a > b) a = b; t.sources.forEach(s => idx[s.id] = new Array(b - a + 1).fill(0));
+  const long = b - a > 52; for (let w = a; w <= b; w++) { const d = dt(w * 7 * DAY); labels.push(long ? d.slice(0, 5) + '/' + d.slice(8, 10) : d.slice(0, 5)); }
   recs.forEach(r => { if (idx[r.source_id]) idx[r.source_id][wk(r.observed_at) - a]++; });
   return { labels, series: t.sources.filter(s => idx[s.id].some(Boolean)).map(s => ({ name: s.name, color: srcColor(s.id), values: idx[s.id] })) };
 }
@@ -398,7 +399,7 @@ function renderTop() {
 }
 function render() {
   renderNav(); renderTop(); const m = $('#main'), y = m.scrollTop;
-  try { m.innerHTML = V[S.view](); } catch (e) { m.innerHTML = `<div class="card note crit">Não foi possível montar esta tela: ${esc(e.message)}. Recarregue a página; se persistir, restaure os dados em Administration.</div>`; console.error(e); }
+  try { m.innerHTML = V[S.view](); } catch (e) { m.innerHTML = `<div class="card note crit">Não foi possível montar esta tela: ${esc(e.message)}. Recarregue a página; se persistir, restaure os dados em Administration.</div>`; console.error(e); reportError('tela ' + S.view + ': ' + e.message, e.stack); }
   if (S.view === 'explorer') initExplorer(); m.scrollTop = S._keep ? y : 0; S._keep = false;
   scheduleSync();
 }
@@ -472,7 +473,8 @@ async function runImportInner(t, im, headerMap) {
   if (consol) { im.parsed.rows = []; im.parsed.preview = null; }
   const total = rows.length, chunk = Math.max(250, Math.min(5000, Math.ceil(total / 30)));
   S.run = { job: b.job, total, paused: false, cancelled: false }; rerender();
-  const step = () => {
+  const step = () => { try { stepInner(); } catch (e) { reportError('importação: ' + (e && e.message), e && e.stack); const r = S.run; S.run = null; if (r) { try { CX.cancelImport(t, r.job, actor()); } catch (e2) { /* já removido */ } } toast('A importação parou por um erro: ' + (e && e.message) + '. Nada parcial foi gravado. O erro foi enviado ao suporte.', true); rerender(); } };
+  const stepInner = () => {
     const r = S.run; if (!r) return; if (r.cancelled) { CX.cancelImport(t, r.job, actor()); S.run = null; toast('Importação cancelada. Nenhum registro parcial permaneceu.'); rerender(); return; }
     if (r.paused) return;
     CX.processChunk(t, r.job, rows, r.job.cursor, Math.min(total, r.job.cursor + chunk));
@@ -842,6 +844,10 @@ async function analyzeConn() {
   ct.aiBusy = false; rerender();
 }
 /* ---------- tempo real: novidades das conexões a cada 30 s ---------- */
+/* ---------- erros no navegador vão para os registros do servidor ---------- */
+function reportError(msg, stack) { try { fetch('/api/client-error', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ msg: String(msg).slice(0, 500), stack: String(stack || '').slice(0, 2000), view: S.view, at: new Date().toISOString() }) }).catch(() => {}); } catch (e) { /* sem rede */ } }
+window.addEventListener('error', e => reportError(e.message, e.error && e.error.stack));
+window.addEventListener('unhandledrejection', e => reportError('promessa: ' + (e.reason && e.reason.message || e.reason), e.reason && e.reason.stack));
 let pullBusy = false;
 async function pullLoop() {
   const t = store.tenants[S.tenant];

@@ -454,7 +454,9 @@ CX.beginImport = function (t, m) {
 const JOIN = { full_name: ' ', org_name: ' ', address: ', ', notes: ' · ' };
 CX.processChunk = function (t, job, rows, start, end) {
   const t0 = Date.now(), map = job.mapping;
-  for (let i = start; i < end; i++) {
+  for (let i = start; i < end; i++) { try { rowStep(i); } catch (e) { job.rowErrors.push({ row: i + 1, msg: 'linha não processada: ' + (e && e.message) }); } }
+  job.cursor = end; job.ms.normalize += Date.now() - t0;
+  function rowStep(i) {
     const arr = rows[i], rec = { id: 'rec_' + (t.idp || '') + (++t.seq).toString(36), source_id: job.sourceId, import_id: job.id, row: i + 1, f: {}, observed_at: job.at, flags: null, origin: job.origin || null };
     let any = false, anyValid = false;
     for (const c in map) {
@@ -466,13 +468,12 @@ CX.processChunk = function (t, job, rows, start, end) {
       const n = CX.isCustom(field) ? nCustom(v) : CX.normalize(field, v); n.raw = String(v); n.col = +c; if (JOIN[field] || field === 'consent') n.row = i; (rec.f[field] = rec.f[field] || []).push(n); any = true; if (n.valid) anyValid = true;
       if (INJECTION.test(n.raw)) { rec.flags = rec.flags || {}; rec.flags.injection = true; }
     }
-    if (!any) { job.rowErrors.push({ row: i + 1, msg: 'nenhum campo mapeado preenchido, registro descartado' }); continue; }
+    if (!any) { job.rowErrors.push({ row: i + 1, msg: 'nenhum campo mapeado preenchido, registro descartado' }); return; }
     job.st.mapped++; job.st.normalized++; if (anyValid) job.st.validated++;
     const ca = rec.f.created_at && rec.f.created_at.find(x => x.valid); if (ca) rec.observed_at = parseDate(ca.value);
     rec.type = (rec.f.full_name || rec.f.cpf || rec.f.job_title || rec.f.birth_date) ? 'person' : ((rec.f.org_name || rec.f.cnpj) ? 'organization' : 'person');
     t.records.push(rec); job.recIds.push(rec.id);
   }
-  job.cursor = end; job.ms.normalize += Date.now() - t0;
 };
 CX.cancelImport = function (t, job, actor) {
   const ids = new Set(job.recIds); t.records = t.records.filter(r => !ids.has(r.id)); job.recIds = []; job.status = 'cancelado';

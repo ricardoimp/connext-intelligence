@@ -256,6 +256,7 @@ export default {
     const parts = url.pathname.split('/').filter(Boolean); // api, ...
     try {
       if (parts[1] === 'session' && req.method === 'GET') return json(await session(env, user.email));
+      if (parts[1] === 'client-error' && req.method === 'POST') { const b = await req.json().catch(() => ({})); console.error('ERRO NO NAVEGADOR · ' + user.email + ' · tela ' + String(b.view || '').slice(0, 30) + ' · ' + String(b.msg || '').slice(0, 500) + ' · ' + String(b.stack || '').slice(0, 1500)); return json({ ok: true }); }
 
       if (parts[1] === 'tenants' && req.method === 'POST' && parts.length === 2) {
         const s = await session(env, user.email); if (!s.canCreateTenants) return fail(403, 'Seu usuário não pode criar organizações.');
