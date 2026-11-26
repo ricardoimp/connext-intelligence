@@ -229,14 +229,25 @@ export async function refreshCandidates(env, ctx, tid, force) {
 export async function refreshStats(env, tid, force) {
   const row = await env.DB.prepare('SELECT dirty, at FROM tenant_stats WHERE tenant_id = ?').bind(tid).first();
   if (!force && row && (!row.dirty || now() - (row.at || 0) < 30000)) return null;
-  const [weekly, bySrc, fields, total, big] = await Promise.all([
-    env.DB.prepare('SELECT source_id AS s, CAST(observed_at / 604800000 AS INTEGER) AS w, COUNT(*) AS n FROM source_records WHERE tenant_id = ? GROUP BY 1, 2').bind(tid).all().then(r => r.results),
-    env.DB.prepare('SELECT source_id AS s, COUNT(*) AS n FROM source_records WHERE tenant_id = ? GROUP BY 1').bind(tid).all().then(r => r.results),
-    env.DB.prepare("SELECT source_id AS s, j.key AS k, COUNT(*) AS n, SUM(CASE WHEN json_extract(j.value, '$[0].valid') THEN 1 ELSE 0 END) AS ok FROM source_records, json_each(json_extract(payload_json, '$.f')) AS j WHERE tenant_id = ? GROUP BY 1, 2").bind(tid).all().then(r => r.results),
-    env.DB.prepare('SELECT COUNT(*) AS n FROM source_records WHERE tenant_id = ?').bind(tid).first(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM (SELECT k FROM record_keys WHERE tenant_id = ? AND record_id NOT IN (SELECT pair_key FROM identity_decisions WHERE tenant_id = ? AND kind = 'split') GROUP BY k HAVING COUNT(*) > ?)").bind(tid, tid, OVERSIZED).first()
-  ]);
-  const stats = { weekly, bySrc, fields, records: total.n, oversized: big.n, at: now() };
+  // durante a carga inicial os indicadores esperam a fila terminar (evita disputar memória com o cálculo)
+  if (!force) { const tn = await env.DB.prepare('SELECT profiles_mode FROM tenants WHERE id = ?').bind(tid).first(); if (tn && tn.profiles_mode === 'migrating') return null; }
+  // leitura em páginas pequenas: cada página traz só fonte, data e chaves de campo válidas/inválidas
+  const wk = new Map(), bs = new Map(), fl = new Map(); let after = '', total = 0;
+  while (true) {
+    const rows = (await env.DB.prepare("SELECT id, source_id AS s, observed_at AS o, (SELECT group_concat(key || '=' || COALESCE(json_extract(value, '$[0].valid'), 0), ',') FROM json_each(json_extract(payload_json, '$.f'))) AS f FROM source_records WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT 4000").bind(tid, after).all()).results;
+    if (!rows.length) break;
+    for (const r of rows) {
+      total++; const w = Math.floor((r.o || 0) / 604800000), kw = r.s + '|' + w; wk.set(kw, (wk.get(kw) || 0) + 1); bs.set(r.s, (bs.get(r.s) || 0) + 1);
+      if (r.f) for (const x of r.f.split(',')) { const e = x.lastIndexOf('='), k = r.s + '|' + x.slice(0, e), a = fl.get(k) || [0, 0]; a[0]++; if (x.slice(e + 1) === '1') a[1]++; fl.set(k, a); }
+    }
+    after = rows[rows.length - 1].id; if (rows.length < 4000) break;
+  }
+  const big = await env.DB.prepare("SELECT COUNT(*) AS n FROM (SELECT k FROM record_keys WHERE tenant_id = ? AND record_id NOT IN (SELECT pair_key FROM identity_decisions WHERE tenant_id = ? AND kind = 'split') GROUP BY k HAVING COUNT(*) > ?)").bind(tid, tid, OVERSIZED).first();
+  const weekly = [], bySrc = [], fields = [];
+  wk.forEach((n, k) => { const i = k.lastIndexOf('|'); weekly.push({ s: k.slice(0, i), w: +k.slice(i + 1), n }); });
+  bs.forEach((n, s) => bySrc.push({ s, n }));
+  fl.forEach((a, k) => { const i = k.indexOf('|'); fields.push({ s: k.slice(0, i), k: k.slice(i + 1), n: a[0], ok: a[1] }); });
+  const stats = { weekly, bySrc, fields, records: total, oversized: big ? big.n : 0, at: now() };
   await env.DB.prepare('INSERT INTO tenant_stats (tenant_id, stats_json, dirty, at) VALUES (?,?,0,?) ON CONFLICT (tenant_id) DO UPDATE SET stats_json = excluded.stats_json, dirty = 0, at = excluded.at').bind(tid, JSON.stringify(stats), now()).run();
   return stats;
 }

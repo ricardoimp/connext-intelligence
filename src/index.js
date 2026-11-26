@@ -607,7 +607,7 @@ export default {
     const due = (await env.DB.prepare("SELECT * FROM connectors WHERE status = 'ativo' AND type != 'webhook' AND (last_sync_at IS NULL OR last_sync_at + schedule_minutes * 60000 <= ?) ORDER BY last_sync_at LIMIT 8").bind(now()).all()).results;
     for (const c of due) ctx.waitUntil(runConnector(env, c.tenant_id, c, 'agendador').catch(() => {}));
     // fila de perfis: cada tenant com pendências recebe uma rodada de processamento
-    const pend = (await env.DB.prepare("SELECT DISTINCT tenant_id FROM (SELECT tenant_id FROM profile_queue UNION SELECT tenant_id FROM tenant_stats WHERE cands_dirty = 1) LIMIT 5").all()).results;
+    const pend = (await env.DB.prepare("SELECT id AS tenant_id FROM tenants WHERE EXISTS (SELECT 1 FROM profile_queue q WHERE q.tenant_id = tenants.id) OR EXISTS (SELECT 1 FROM tenant_stats s WHERE s.tenant_id = tenants.id AND s.cands_dirty = 1) LIMIT 5").all()).results;
     for (const p of pend) ctx.waitUntil(processQueue(env, p.tenant_id, 50000, true).then(() => refreshStats(env, p.tenant_id)).catch(e => console.error('fila: ' + e.message)));
     // recálculo diário (03h de Brasília): a atualidade dos dados depende da data, então todo perfil é refeito uma vez por dia
     const day = Math.floor((now() - 3 * 3600000) / 86400000);
