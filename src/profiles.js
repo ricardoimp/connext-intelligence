@@ -237,9 +237,9 @@ export async function refreshCandidates(env, ctx, tid, force) {
 // indicadores por fonte e por semana, calculados no banco (a interface não carrega mais os registros)
 export async function refreshStats(env, tid, force) {
   const row = await env.DB.prepare('SELECT dirty, at FROM tenant_stats WHERE tenant_id = ?').bind(tid).first();
-  if (!force && row && (!row.dirty || now() - (row.at || 0) < 30000)) return null;
-  // durante a carga inicial os indicadores esperam a fila terminar (evita disputar memória com o cálculo)
-  if (!force) { const tn = await env.DB.prepare('SELECT profiles_mode FROM tenants WHERE id = ?').bind(tid).first(); if (tn && tn.profiles_mode === 'migrating') return null; }
+  if (!force && row && (!row.dirty || now() - (row.at || 0) < 300000)) return null;
+  // enquanto houver fila, os indicadores esperam (a leitura completa disputaria o banco com o cálculo dos perfis)
+  if (!force) { const q = await env.DB.prepare('SELECT 1 AS x FROM profile_queue WHERE tenant_id = ? LIMIT 1').bind(tid).first(); if (q) return null; }
   // leitura em páginas pequenas: cada página traz só fonte, data e chaves de campo válidas/inválidas
   const wk = new Map(), bs = new Map(), fl = new Map(); let after = '', total = 0;
   while (true) {
