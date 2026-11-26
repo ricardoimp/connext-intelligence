@@ -37,7 +37,17 @@ function toast(msg, err) { const d = document.createElement('div'); if (err) d.c
 
 /* ---------- componentes ---------- */
 const chip = (t, k) => `<span class="chip ${k || ''}">${esc(t)}</span>`;
-const lvl = n => `<span class="lvl l${n}">L${n}</span>`;
+// níveis de completude: mesmas regras do motor (CX.rebuild)
+const LEVELS = [
+  'Sem identificador válido: nenhum e-mail, telefone, CPF ou CNPJ que passe na validação.',
+  'Identificado: ao menos um identificador válido (e-mail, telefone, CPF ou CNPJ).',
+  'Contatável: nome mais e-mail ou telefone válido.',
+  'Qualificado: nível L2 com completude de 50% ou mais.',
+  'Completo: completude de 65% ou mais, com e-mail e telefone válidos e organização (para pessoas).',
+  'Verificado: completude de 80% ou mais, com documento (CPF ou CNPJ) e sem conflito entre fontes.'
+];
+const levelTip = i => 'Nível L' + i + '|' + LEVELS[i];
+const lvl = n => `<span class="lvl l${n}" data-tip="${esc(levelTip(n))}">L${n}</span>`;
 const card = (cls, title, sub, body, extra) => `<section class="card ${cls}"><div class="hd"><h3>${title}</h3>${sub ? `<small>${sub}</small>` : ''}<span class="sp"></span>${extra || ''}</div>${body}</section>`;
 const tbl = (heads, rows, cls) => `<div class="tw"><table class="${cls || ''}"><thead><tr>${heads.map(h => h.startsWith('n:') ? `<th class="n">${h.slice(2)}</th>` : `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${heads.length}" class="muted">Sem dados para os filtros atuais.</td></tr>`}</tbody></table></div>`;
 const meter = (v, color) => `<div class="meter" title="${v}"><b style="width:${Math.max(0, Math.min(100, v))}%;${color ? 'background:' + color : ''}"></b></div>`;
@@ -152,7 +162,7 @@ V.overview = () => {
   ${card('c4', 'Indicadores médios', 'cinco indicadores independentes', `<div class="row" style="justify-content:center">${ring(dqi, 'DQI')}</div><div class="row" style="justify-content:center">${radar(SCORES.map(([k, l]) => ({ label: l, value: avgOf(ps, k) })), 'var(--accent)')}</div>`)}
   ${card('c12', 'Do dado bruto ao perfil publicado', 'volume em cada etapa do pipeline', flow(stages(t, ps)))}
   ${card('c12', 'Funil comercial', 'etapa de cada lead: regras para os casos claros, CONNEXT IA para status e observações em texto livre', funnelBody(ps))}
-  ${card('c4', 'Distribuição L0 a L5', 'evolução de completude com requisitos de identificação', colBars(lv.map((v, i) => ({ label: 'L' + i, value: v, color: `var(--q${i})`, tip: 'Nível L' + i + '|' + fmt(v) + ' perfis|' + pct(v, ps.length) + '% da base' }))))}
+  ${card('c4', 'Distribuição L0 a L5', 'evolução de completude com requisitos de identificação', colBars(lv.map((v, i) => ({ label: 'L' + i, value: v, color: `var(--q${i})`, tip: levelTip(i) + '|' + fmt(v) + ' perfis · ' + pct(v, ps.length) + '% da base' }))) + `<div class="legend" style="margin-top:6px">${LEVELS.map((d, i) => `<span data-tip="${esc(levelTip(i))}" style="cursor:help"><i style="background:var(--q${i})"></i>L${i}</span>`).join('')}</div>`, `<span class="chip plain" style="cursor:help" data-tip="${esc('O que é cada nível|' + LEVELS.map((d, i) => 'L' + i + ' · ' + d).join('|'))}">ⓘ Legenda</span>`)}
   ${card('c4', 'Evolução da qualidade', 'DQI medido ao fim de cada importação', lineChart(snaps, 'dqi', 'DQI'))}
   ${card('c4', 'Elegíveis por finalidade', 'verificação bloqueante, independente de pontuação', hbars(Object.keys(el).map((k, i) => ({ label: CX.PURPOSES[k], value: el[k], color: `var(--s${[1, 3, 7, 5][i]})`, tip: CX.PURPOSES[k] + '|' + fmt(el[k]) + ' de ' + fmt(ps.length) + ' perfis' })), ps.length))}
   ${card('c12', 'Cobertura de atributos por fonte', 'parcela dos registros de cada fonte com valor válido', `<div class="tw"><table class="hm"><thead><tr><th></th>${hmF.map(k => `<th>${F[k].label.split(' ')[0]}</th>`).join('')}</tr></thead><tbody>${t.sources.filter(s => st[s.id].records).map(s => `<tr><th style="text-align:left;border:0">${esc(s.name)}</th>${hmF.map(k => { const v = pct(st[s.id].fields[k] || 0, st[s.id].records); return `<td data-tip="${esc(s.name + ' · ' + F[k].label + '|' + v + '% dos ' + fmt(st[s.id].records) + ' registros')}"><div style="background:color-mix(in srgb,var(--s1) ${Math.round(v * 0.85)}%,var(--surface2))">${v || '·'}</div></td>`; }).join('')}</tr>`).join('')}</tbody></table></div>`)}
