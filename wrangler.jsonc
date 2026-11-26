@@ -36,6 +36,6 @@
     "HOME_TENANT_NAME": "Connext Intelligence",
     "INGEST_HOST": "ingest.connextintelligence.com"
   },
-  "triggers": { "crons": ["*/15 * * * *"] },
+  "triggers": { "crons": ["* * * * *"] },
   "observability": { "enabled": true }
 }

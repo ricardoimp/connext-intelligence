@@ -126,6 +126,25 @@ async function push(t, onProgress) {
   return { written, denied };
 }
 
+/* ---------- novidades do servidor (conexões em tempo real) ---------- */
+// traz registros, importações e campos que chegaram pelas conexões depois da última leitura, sem recarregar a base
+async function pullChanges(t) {
+  const since = t._pullAt || 0, d = await call('GET', '/t/' + encodeURIComponent(t.id) + '/changes?since=' + since);
+  const have = new Set(t.records.map(r => r.id)), haveImp = new Set(t.imports.map(i => i.id));
+  let added = 0, imps = 0;
+  for (const x of d.rows) { if (have.has(x.id)) continue; const p = parse(x.payload_json, {}); t.records.push({ id: x.id, source_id: x.source_id, import_id: x.import_id, row: x.row_num, f: p.f || {}, flags: p.flags || null, origin: p.origin || null, observed_at: x.observed_at, type: x.entity_type }); have.add(x.id); added++; }
+  for (const i of d.imports) { if (haveImp.has(i.id)) continue; const x = parse(i.data_json, {}); t.imports.push({ id: i.id, sourceId: i.source_id, fileName: i.file_name, fileHash: i.file_hash, format: i.format, encoding: i.encoding, bytes: i.bytes, version: i.version, at: i.at, actor: i.actor, status: i.status, mapping: x.mapping || {}, columnNames: x.columnNames || null, total: i.total, cursor: x.cursor || i.total, parseErrors: x.parseErrors || [], rowErrors: x.rowErrors || [], st: x.st || { received: i.received, extracted: i.received, mapped: i.normalized, normalized: i.normalized, validated: i.validated }, ms: x.ms || { extract: 0, normalize: 0, resolve: 0 }, recIds: [], raw_key: i.raw_key, provenance: parse(i.provenance_json, null), raw_sha256: i.raw_sha256, ai_analysis_id: i.ai_analysis_id, decision: parse(i.decision_json, null) }); imps++; }
+  for (const c of d.customFields || []) if (!(t.customFields || []).some(x => x.k === c.field_key)) (t.customFields = t.customFields || []).push({ k: c.field_key, label: c.label, type: c.data_type, origin_column: c.origin_column, source_id: c.source_id, import_id: c.import_id, created_by: c.created_by, created_at: c.created_at });
+  t._pullAt = d.more && d.rows.length ? d.rows[d.rows.length - 1].created_at : d.now;
+  if (added || imps) {
+    CX.rebuild(t);
+    // o que veio do servidor já está gravado: entra na linha de base para não ser reenviado
+    const T = tables(t, t._sync), st = t._sync;
+    ['source_records', 'import_jobs', 'custom_fields'].forEach(tb => { const m = st.maps[tb] = st.maps[tb] || new Map(); (T[tb] || []).forEach(r => { const k = keyOf(tb, r); if (!m.has(k)) m.set(k, MUTABLE[tb] ? CX.hash(j(r)) : '1'); }); });
+  }
+  return { added, imports: imps, more: !!d.more };
+}
+
 /* ---------- carga ---------- */
 function mergeCfg(base, saved) {
   const c = Object.assign({}, base, saved || {});
@@ -161,6 +180,7 @@ async function loadTenant(id, role, onProgress) {
     got += r.rows.length; if (onProgress) onProgress(got, d.records);
     if (!r.next) break; after = r.next;
   }
+  t._pullAt = d.now || Date.now();
   CX.rebuild(t);
   // linha de base: o que veio do servidor já está gravado
   const T = tables(t, null), ents = T.canonical_entities; delete T.canonical_entities; delete T.golden_profile_versions;
@@ -181,7 +201,7 @@ root.CXSync = {
     catch (e) { if (e.status === 401) { S.session = { error: e.message, status: 401 }; return S.session; } return null; }
   },
   session: () => S.session,
-  loadTenant, push,
+  loadTenant, push, pullChanges,
   createTenant: name => call('POST', '/tenants', { name }),
   members: tid => call('GET', '/t/' + encodeURIComponent(tid) + '/members').then(r => r.members),
   setMember: (tid, email, role) => call('POST', '/t/' + encodeURIComponent(tid) + '/members', { email, role }),

@@ -143,7 +143,7 @@ async function load(env, tid) {
   const entities = await env.DB.prepare('SELECT id, sig FROM canonical_entities WHERE tenant_id = ?').bind(tid).all().then(r => r.results);
   const stages = await env.DB.prepare('SELECT entity_id, stage, method, confidence, reason, sig, model, actor, at FROM lead_stages WHERE tenant_id = ?').bind(tid).all().then(r => r.results);
   const customFields = await env.DB.prepare('SELECT * FROM custom_fields WHERE tenant_id = ? ORDER BY created_at').bind(tid).all().then(r => r.results);
-  return { ok: true, stages, customFields, tenant, sources, imports, decisions, candidates, mappings, snapshots, models, runs, results, cache, execs, segs, supp, erased, audit: auditRows, entities, records: count.n };
+  return { ok: true, now: now(), stages, customFields, tenant, sources, imports, decisions, candidates, mappings, snapshots, models, runs, results, cache, execs, segs, supp, erased, audit: auditRows, entities, records: count.n };
 }
 
 /* ---------- sincronização ---------- */
@@ -204,9 +204,10 @@ async function runConnector(env, tid, c, actor) {
   const t0 = now(); let res;
   try {
     const data = await fetchBatch(c.type, JSON.parse(c.config_json || '{}'), secret, c.cursor);
-    const out = await serverImport(env, tid, c, data, c.name + ' · ' + new Date().toISOString().slice(0, 16).replace('T', ' '), actor, { canal: 'conector ' + c.type, executado_por: actor, cursor_anterior: c.cursor || null });
+    if (!data.rows.length) { res = { fetched: 0, records: 0, more: false, ms: now() - t0, skipped: true, reason: 'nenhum registro novo' }; await env.DB.prepare('UPDATE connectors SET cursor = ?, last_sync_at = ?, last_result_json = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(data.cursor || c.cursor, now(), JSON.stringify(res), tid, c.id).run(); return res; }
+    const out = await serverImport(env, tid, c, data, c.name + ' · ' + new Date().toISOString().slice(0, 16).replace('T', ' '), actor, { canal: 'conector ' + c.type, executado_por: actor, cursor_anterior: c.cursor || null, cursor_novo: data.cursor || null, paginas: data.pages || null, origem_declarada: data.meta || null });
     res = Object.assign({ fetched: data.rows.length, more: !!data.more, ms: now() - t0 }, out);
-    await env.DB.prepare('UPDATE connectors SET cursor = ?, last_sync_at = ?, last_result_json = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(data.fullSnapshot ? c.cursor : (data.cursor || c.cursor), now(), JSON.stringify(res), tid, c.id).run();
+    await env.DB.prepare('UPDATE connectors SET cursor = ?, last_sync_at = ?, last_result_json = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(data.fullSnapshot ? c.cursor : (data.cursor || c.cursor), data.more ? now() - c.schedule_minutes * 60000 : now(), JSON.stringify(res), tid, c.id).run();
     return res;
   } catch (e) {
     await env.DB.prepare('UPDATE connectors SET last_sync_at = ?, last_error = ? WHERE tenant_id = ? AND id = ?').bind(now(), String(e.message || e).slice(0, 500), tid, c.id).run();
@@ -275,6 +276,15 @@ export default {
         if (sub === 'load' && req.method === 'GET') return json(await load(env, tid));
         if (sub === 'analysis' && req.method === 'GET' && parts[4]) { const a = await env.DB.prepare('SELECT id, kind, ref, at, actor, model, result_json FROM ai_analyses WHERE tenant_id = ? AND id = ?').bind(tid, parts[4]).first(); return a ? json({ ok: true, analysis: a }) : fail(404, 'Análise não encontrada.'); }
 
+        if (sub === 'changes' && req.method === 'GET') {
+          // registros e importações que chegaram depois de um instante (conexões em tempo real)
+          const since = +url.searchParams.get('since') || 0, limit = 5000;
+          const rows = (await env.DB.prepare('SELECT id, source_id, import_id, row_num, entity_type, observed_at, payload_json, created_at FROM source_records WHERE tenant_id = ? AND created_at > ? ORDER BY created_at, id LIMIT ?').bind(tid, since, limit).all()).results;
+          const until = rows.length === limit ? rows[rows.length - 1].created_at : null;
+          const imports = (await env.DB.prepare('SELECT * FROM import_jobs WHERE tenant_id = ? AND at > ? ORDER BY at').bind(tid, since - 600000).all()).results;
+          const customFields = (await env.DB.prepare('SELECT * FROM custom_fields WHERE tenant_id = ? AND created_at > ?').bind(tid, since - 600000).all()).results;
+          return json({ ok: true, rows, imports, customFields, more: !!until, now: now() });
+        }
         if (sub === 'records' && req.method === 'GET') {
           const after = url.searchParams.get('after') || '', limit = Math.min(5000, +url.searchParams.get('limit') || 2000);
           const rows = (await env.DB.prepare('SELECT id, source_id, import_id, row_num, entity_type, observed_at, payload_json FROM source_records WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?').bind(tid, after, limit).all()).results;
@@ -379,7 +389,7 @@ export default {
           const cid = parts[4], action = parts[5];
           if (!cid && req.method === 'GET') {
             const rows = (await env.DB.prepare('SELECT * FROM connectors WHERE tenant_id = ? ORDER BY created_at').bind(tid).all()).results;
-            return json({ ok: true, connectors: rows.map(pubConn), types: Object.fromEntries(Object.entries(TYPES).map(([k, v]) => [k, { label: v.label, secret: v.secret, fields: v.fields }])), ingest_base: 'https://' + (env.INGEST_HOST || 'ingest.connextintelligence.com') + '/in/' + tid + '/' });
+            return json({ ok: true, connectors: rows.map(pubConn), types: Object.fromEntries(Object.entries(TYPES).map(([k, v]) => [k, { label: v.label, secret: v.secret, fields: v.fields, minSchedule: v.minSchedule || 15 }])), ingest_base: 'https://' + (env.INGEST_HOST || 'ingest.connextintelligence.com') + '/in/' + tid + '/' });
           }
           if (!can(role, 'config')) return fail(403, 'Apenas administradores gerenciam conexões.');
           if (!cid && req.method === 'POST') {
@@ -393,7 +403,8 @@ export default {
             if (TYPES[b.type].secret) { if (!b.secret) return fail(400, 'Informe a credencial da conexão.'); secretEnc = await seal(env, String(b.secret)); }
             if (b.type === 'webhook') { key = 'cx_' + rid() + rid(); keyHash = await sha256(key); }
             await env.DB.prepare('INSERT INTO connectors (tenant_id, id, type, name, source_id, config_json, secret_enc, key_hash, status, schedule_minutes, created_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-              .bind(tid, id, b.type, String(b.name || TYPES[b.type].label).slice(0, 80), srcRow.id, JSON.stringify(cfg), secretEnc, keyHash, 'ativo', Math.max(15, Math.min(1440, +b.schedule_minutes || 60)), now(), user.email).run();
+              .bind(tid, id, b.type, String(b.name || TYPES[b.type].label).slice(0, 80), srcRow.id, JSON.stringify(cfg), secretEnc, keyHash, 'ativo', Math.max(TYPES[b.type].minSchedule || 15, Math.min(1440, +b.schedule_minutes || 60)), now(), user.email).run();
+            if (b.mapping && typeof b.mapping === 'object') { const m = {}; Object.entries(b.mapping).forEach(([h, f]) => { m[String(h).slice(0, 120)] = f && (globalThis.CX.F[f] || /^x_[a-z0-9]{1,40}$/.test(f)) ? f : null; }); await env.DB.prepare('UPDATE connectors SET mapping_json = ? WHERE tenant_id = ? AND id = ?').bind(JSON.stringify(m), tid, id).run(); }
             await audit(env, tid, user.email, 'conector_criado', TYPES[b.type].label + ' · ' + (b.name || ''), id);
             return json({ ok: true, id, key, endpoint: b.type === 'webhook' ? 'https://' + (env.INGEST_HOST || 'ingest.connextintelligence.com') + '/in/' + tid + '/' + id : null });
           }
@@ -413,9 +424,16 @@ export default {
               await audit(env, tid, user.email, 'conector_mapeamento', c.name, c.id);
               return json({ ok: true });
             }
+            if (action === 'secret' && req.method === 'POST') {
+              const b = await req.json(); if (!TYPES[c.type] || !TYPES[c.type].secret) return fail(400, 'Esta conexão não usa credencial.');
+              if (!b.secret || String(b.secret).length < 8) return fail(400, 'Informe a credencial completa.');
+              await env.DB.prepare('UPDATE connectors SET secret_enc = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(await seal(env, String(b.secret)), tid, cid).run();
+              await audit(env, tid, user.email, 'conector_credencial_trocada', c.name, c.id);
+              return json({ ok: true });
+            }
             if (action === 'status' && req.method === 'POST') {
               const b = await req.json(), st = b.status === 'pausado' ? 'pausado' : 'ativo';
-              await env.DB.prepare('UPDATE connectors SET status = ?, schedule_minutes = COALESCE(?, schedule_minutes) WHERE tenant_id = ? AND id = ?').bind(st, b.schedule_minutes ? Math.max(15, Math.min(1440, +b.schedule_minutes)) : null, tid, cid).run();
+              await env.DB.prepare('UPDATE connectors SET status = ?, schedule_minutes = COALESCE(?, schedule_minutes) WHERE tenant_id = ? AND id = ?').bind(st, b.schedule_minutes ? Math.max((TYPES[c.type] || {}).minSchedule || 15, Math.min(1440, +b.schedule_minutes)) : null, tid, cid).run();
               return json({ ok: true });
             }
             if (!action && req.method === 'DELETE') {
@@ -442,7 +460,7 @@ export default {
 
   // sincronização agendada dos conectores de leitura (Google Sheets, HubSpot, Salesforce, bancos)
   async scheduled(event, env, ctx) {
-    const due = (await env.DB.prepare("SELECT * FROM connectors WHERE status = 'ativo' AND type != 'webhook' AND (last_sync_at IS NULL OR last_sync_at + schedule_minutes * 60000 <= ?) ORDER BY last_sync_at LIMIT 5").bind(now()).all()).results;
+    const due = (await env.DB.prepare("SELECT * FROM connectors WHERE status = 'ativo' AND type != 'webhook' AND (last_sync_at IS NULL OR last_sync_at + schedule_minutes * 60000 <= ?) ORDER BY last_sync_at LIMIT 8").bind(now()).all()).results;
     for (const c of due) ctx.waitUntil(runConnector(env, c.tenant_id, c, 'agendador').catch(() => {}));
   }
 };

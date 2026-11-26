@@ -6,6 +6,7 @@ import mysql from 'mysql2/promise';
 
 export const TYPES = {
   webhook: { label: 'Webhook / API de entrada', secret: false, fields: [] },
+  api_rest: { label: 'API REST (leitura paginada por cursor)', secret: 'Chave de acesso (enviada como Authorization: Bearer)', fields: [['url', 'URL do endpoint GET (https://...)'], ['records_path', 'Campo com a lista de registros (padrão: dados)'], ['page_size', 'Registros por página (padrão: 500)'], ['updated_field', 'Campo de última atualização (padrão: updated_at)'], ['id_field', 'Campo identificador (padrão: id)']], minSchedule: 1 },
   google_sheets: { label: 'Google Sheets', secret: 'JSON da conta de serviço do Google', fields: [['spreadsheet_id', 'ID da planilha'], ['range', 'Aba e intervalo (ex.: Leads!A:Z)']] },
   hubspot: { label: 'HubSpot', secret: 'Token do aplicativo privado do HubSpot', fields: [['object', 'Objeto (contacts ou companies)']] },
   salesforce: { label: 'Salesforce', secret: 'Client secret do aplicativo conectado', fields: [['instance_url', 'URL da instância (https://suaempresa.my.salesforce.com)'], ['client_id', 'Client ID do aplicativo conectado'], ['object', 'Objeto (Lead ou Contact)']] },
@@ -91,6 +92,34 @@ async function salesforce(cfg, secret, cursor) {
   return Object.assign(table(objs), { cursor: max.replace(/\.000\+0000$/, 'Z').replace(/\+0000$/, 'Z'), more: (j.records || []).length === 2000 });
 }
 
+/* ---------- API REST paginada por cursor ----------
+   Protocolo: GET url?limite=N[&desde=...&cursor=...]; resposta { <lista>: [...], proximo_cursor: {desde, cursor} | null }.
+   Enquanto proximo_cursor vier preenchido, seus campos vão como parâmetros da próxima página. Quando vier nulo,
+   a posição guardada para a próxima sincronização é o último registro recebido (updated_at + id). */
+const pick = (o, path) => String(path || '').split('.').filter(Boolean).reduce((a, k) => a == null ? a : a[k], o);
+async function apiRest(cfg, secret, cursor, maxPages, sample) {
+  let base; try { base = new URL(String(cfg.url || '').trim()); } catch (e) { throw Object.assign(new Error('URL do endpoint inválida.'), { status: 400 }); }
+  if (base.protocol !== 'https:') throw Object.assign(new Error('Use um endpoint https.'), { status: 400 });
+  const size = sample ? 20 : Math.max(1, Math.min(1000, +cfg.page_size || 500)), listPath = cfg.records_path || 'dados', upd = cfg.updated_field || 'updated_at', idf = cfg.id_field || 'id';
+  let pos = null; try { pos = cursor ? JSON.parse(cursor) : null; } catch (e) { pos = null; }
+  const objs = []; let pages = 0, more = false, last = null, meta = {};
+  while (true) {
+    const u = new URL(base); u.searchParams.set('limite', String(size));
+    if (pos && typeof pos === 'object') for (const k in pos) if (pos[k] != null && pos[k] !== '') u.searchParams.set(k, String(pos[k]));
+    const j = await httpJson(u.toString(), { headers: { authorization: 'Bearer ' + secret, accept: 'application/json' } }, 'API ' + base.host);
+    const list = Array.isArray(j) ? j : pick(j, listPath);
+    if (!Array.isArray(list)) throw Object.assign(new Error('A resposta não tem a lista "' + listPath + '". Ajuste o campo da lista de registros.'), { status: 502 });
+    if (!pages && j && typeof j === 'object') meta = { proprietario: j.proprietario || null, fonte: j.fonte || null, gerado_em: j.gerado_em || null };
+    list.forEach(o => objs.push(o)); if (list.length) last = list[list.length - 1]; pages++;
+    const nx = j && (j.proximo_cursor || j.next_cursor || null);
+    if (sample) break;
+    if (nx && typeof nx === 'object' && JSON.stringify(nx) !== JSON.stringify(pos) && list.length) { pos = nx; if (pages >= maxPages) { more = true; break; } continue; }
+    if (last && last[upd] != null) pos = { desde: last[upd], cursor: last[idf] };
+    break;
+  }
+  return Object.assign(table(objs), { cursor: pos ? JSON.stringify(pos) : (cursor || null), more, pages, meta });
+}
+
 /* ---------- Bancos externos (somente leitura) ---------- */
 async function pg(cfg, secret, cursor, limit) {
   const q = safeSelect(cfg.query), col = cfg.cursor_column;
@@ -119,6 +148,7 @@ async function my(cfg, secret, cursor, limit) {
 
 export async function fetchBatch(type, cfg, secret, cursor, opts) {
   const limit = (opts && opts.limit) || 5000;
+  if (type === 'api_rest') return apiRest(cfg, secret, cursor, opts && opts.maxPages || 10, opts && opts.sample);
   if (type === 'google_sheets') return sheets(cfg, secret);
   if (type === 'hubspot') return hubspot(cfg, secret, cursor, opts && opts.sample ? 1 : 20);
   if (type === 'salesforce') return salesforce(cfg, secret, cursor);
