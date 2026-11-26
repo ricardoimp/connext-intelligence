@@ -183,7 +183,7 @@ V.sources = () => {
 };
 V.import = () => {
   const t = T(), im = S.imp, run = S.run;
-  let body = `<div class="drop" id="drop"><p><b>Arraste arquivos aqui</b> ou</p><div class="row" style="justify-content:center"><button class="btn pri" data-act="pick">Selecionar arquivos</button><button class="btn" data-act="sample">Usar arquivo de exemplo com colunas desconhecidas</button></div><p class="muted" style="margin-bottom:0">CSV, TSV, XLS, XLSX, JSON, JSONL e XML são lidos no navegador. O arquivo não sai do seu computador.</p></div>`;
+  let body = `<div class="drop" id="drop"><p><b>Arraste arquivos aqui</b> ou</p><div class="row" style="justify-content:center"><button class="btn pri" data-act="pick">Selecionar arquivos</button><button class="btn" data-act="sample">Usar arquivo de exemplo com colunas desconhecidas</button></div><p class="muted" style="margin-bottom:0">CSV, TSV, XLS, XLSX, JSON, JSONL e XML. A CONNEXT IA analisa o arquivo antes de gravar e o original fica guardado com o comprovante de origem.</p></div>`;
   if (run) body = `<div class="stack"><b>Processando ${esc(run.job.fileName)}</b><div class="meter" style="height:10px"><b id="prog" style="width:${pct(run.job.cursor, run.total)}%"></b></div><div class="row"><span class="mono" id="prog-t">${fmt(run.job.cursor)} de ${fmt(run.total)} linhas</span><span class="sp" style="flex:1"></span><button class="btn" data-act="pause">${run.paused ? 'Retomar' : 'Pausar'}</button><button class="btn dan" data-act="cancel">Cancelar com segurança</button></div></div>`;
   else if (im) {
     const p = im.parsed, src = t.sources.find(s => s.id === im.sourceId), miss = CX.sourcePolicy(src), amb = im.sug.cols.filter(c => c.ambiguous).length, sens = im.sug.cols.filter(c => c.sensitive).length;
@@ -199,9 +199,44 @@ V.import = () => {
   }
   return `<div class="grid">${card('c12', 'Upload e mapeamento', 'detecção de formato, codificação, delimitador, tipos e atributos sensíveis', body)}
   ${S.impOpen && t.imports.find(i => i.id === S.impOpen) ? provenanceCard(t.imports.find(i => i.id === S.impOpen)) : ''}
-  ${card('c12', 'Histórico de importações', 'clique em uma importação para ver o comprovante de origem', tbl(['Importação', 'Arquivo', 'Fonte', 'Formato', 'n:Versão', 'n:Linhas', 'n:Registros', 'n:Erros', 'Data', 'Status'], t.imports.slice().reverse().map(i => `<tr class="click" data-act="impOpen" data-id="${i.id}"><td class="mono">${i.id}${i.provenance ? '<br>' + chip('comprovante', 'good') : t.remote ? '<br>' + chip('sem comprovante', 'warn') : ''}</td><td>${esc(i.fileName)}<br><span class="mono muted">${i.fileHash}</span></td><td>${esc(srcName(i.sourceId))}</td><td>${i.format || ''}</td><td class="n">${i.version}</td><td class="n">${fmt(i.st.received)}</td><td class="n">${fmt(i.st.normalized)}</td><td class="n">${i.rowErrors.length + i.parseErrors.length}</td><td>${dt(i.at)}</td><td>${chip(i.status, i.status === 'concluído' ? 'good' : i.status === 'cancelado' ? 'crit' : 'info')}</td></tr>`)))}
-  ${card('c12', 'O que roda nesta versão', '', '<p class="note info">Leitura, detecção, mapeamento sugerido, normalização, validação, resolução de identidade e pontuação executam de verdade no navegador, em lotes, sem travar a interface. Upload retomável por URL assinada, verificação de malware e Parquet dependem do serviço de backend e não estão simulados aqui.</p>')}</div>`;
+  ${importHistory(t)}
+  ${card('c12', 'Como a importação funciona', '', '<p class="note info">O arquivo é lido no navegador, analisado pela CONNEXT IA e só é gravado depois da sua decisão. O original vai para o armazenamento do servidor com IP, data, hora, local e SHA-256. Arquivos acima de 60 MB são lidos em fatias e, quando são registros de acesso, consolidados por pessoa. Mantenha a aba aberta até aparecer "Salvo no banco".</p>')}</div>`;
 };
+/* ---------- histórico de importações: bruto x líquido ---------- */
+// bruto = linhas do arquivo (ou da origem); líquido = registros gravados; perfis novos = perfis que nasceram nesta importação
+function importYield(t) {
+  const d = t.derived; if (d && d._yield && d._yieldN === t.records.length) return d._yield;
+  const order = {}; t.imports.forEach((i, k) => order[i.id] = k);
+  const recImp = new Map(); for (const r of t.records) recImp.set(r.id, r.import_id);
+  const novos = {}, unidos = {};
+  for (const p of (d ? d.profiles : [])) {
+    let first = null; for (const id of p.record_ids) { const im = recImp.get(id); if (im != null && (first == null || order[im] < order[first])) first = im; }
+    if (first != null) novos[first] = (novos[first] || 0) + 1;
+    const seen = new Set(); for (const id of p.record_ids) { const im = recImp.get(id); if (im != null && im !== first && !seen.has(im)) { seen.add(im); unidos[im] = (unidos[im] || 0) + 1; } }
+  }
+  const out = {}; t.imports.forEach(i => {
+    const c = i.consolidation || (i.decision && i.decision.consolidacao) || null;
+    const bruto = c ? c.linhas_no_arquivo : (i.st.received || i.total || 0), liquido = i.st.normalized || 0;
+    out[i.id] = { bruto, liquido, pct: bruto ? liquido / bruto : 0, consolidadas: c ? bruto - c.pessoas - (c.sem_identificador || 0) : 0, descartadas: (i.rowErrors || []).filter(e => !e.warn).length, novos: novos[i.id] || 0, unidos: unidos[i.id] || 0, consol: c };
+  });
+  if (d) { d._yield = out; d._yieldN = t.records.length; }
+  return out;
+}
+function importHistory(t) {
+  const y = importYield(t), list = t.imports.slice().reverse(), ok = list.filter(i => i.status === 'concluído');
+  const tb = ok.reduce((a, i) => a + y[i.id].bruto, 0), tl = ok.reduce((a, i) => a + y[i.id].liquido, 0), tn = ok.reduce((a, i) => a + y[i.id].novos, 0);
+  const pc = v => (v * 100).toLocaleString('pt-BR', { minimumFractionDigits: v < 0.1 ? 1 : 0, maximumFractionDigits: 1 }) + '%';
+  const bar = (v, neutral) => `<div style="display:flex;align-items:center;gap:8px;min-width:150px"><div style="flex:1;height:8px;border-radius:4px;background:var(--line);overflow:hidden"><div style="width:${Math.max(1, Math.round(v * 100))}%;height:100%;border-radius:4px;background:${neutral ? 'var(--s1)' : v >= 0.8 ? 'var(--good)' : v >= 0.3 ? 'var(--s1)' : 'var(--warn)'}"></div></div><b class="mono" style="min-width:44px;text-align:right">${pc(v)}</b></div>`;
+  const tip = (i, r) => {
+    const parts = ['Aproveitamento de ' + i.fileName, fmt(r.bruto) + ' linhas brutas → ' + fmt(r.liquido) + ' registros líquidos (' + pc(r.pct) + ')'];
+    if (r.consol) parts.push(fmt(r.consolidadas) + ' linhas eram sessões repetidas da mesma pessoa (consolidadas)');
+    if (r.descartadas) parts.push(fmt(r.descartadas) + ' linhas descartadas por não terem nenhum campo válido');
+    parts.push(fmt(r.novos) + ' perfis novos · ' + fmt(r.unidos) + ' perfis já existentes enriquecidos');
+    return parts.join('|');
+  };
+  const sum = `<div class="row" style="gap:28px;margin-bottom:12px;flex-wrap:wrap"><div><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.08em">Linhas brutas recebidas</div><div style="font-size:22px;font-weight:600">${fmt(tb)}</div></div><div><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.08em">Registros líquidos</div><div style="font-size:22px;font-weight:600">${fmt(tl)}</div></div><div style="min-width:220px"><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.08em">Aproveitamento geral</div><div style="margin-top:6px">${bar(tb ? tl / tb : 0, true)}</div></div><div><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.08em">Perfis novos gerados</div><div style="font-size:22px;font-weight:600">${fmt(tn)}</div></div></div>`;
+  return card('c12', 'Histórico de importações', 'bruto x líquido de cada importação · passe o mouse no aproveitamento para ver o motivo · clique para ver o comprovante', sum + tbl(['Importação', 'Arquivo', 'Fonte', 'Data', 'n:Linhas brutas', 'n:Registros líquidos', 'Aproveitamento', 'n:Perfis novos', 'Status'], list.map(i => { const r = y[i.id]; return `<tr class="click" data-act="impOpen" data-id="${i.id}"><td class="mono">${i.id}${i.provenance ? '<br>' + chip('comprovante', 'good') : t.remote ? '<br>' + chip('sem comprovante', 'warn') : ''}</td><td>${esc(i.fileName)}<br><span class="mono muted">${esc(i.format || '')}${i.fileHash ? ' · ' + i.fileHash : ''}</span>${r.consol ? '<br>' + chip('consolidado por pessoa', 'info') : ''}</td><td>${esc(srcName(i.sourceId))}</td><td>${dt(i.at)}</td><td class="n">${fmt(r.bruto)}</td><td class="n">${fmt(r.liquido)}</td><td data-tip="${esc(tip(i, r))}" style="cursor:help">${i.status === 'concluído' ? bar(r.pct, !!r.consol) : '<span class="muted">n/d</span>'}</td><td class="n">${fmt(r.novos)}</td><td>${chip(i.status, i.status === 'concluído' ? 'good' : i.status === 'cancelado' || i.status === 'interrompido' ? 'crit' : 'info')}</td></tr>`; })));
+}
 V.pipeline = () => {
   const t = T(), ps = P(); if (!t.imports.length) return empty('Nenhuma execução de pipeline neste tenant.');
   const thr = t.imports.reduce((a, i) => a + i.st.normalized, 0) / Math.max(1, t.imports.reduce((a, i) => a + i.ms.normalize + i.ms.resolve + i.ms.extract, 0)) * 1000;
