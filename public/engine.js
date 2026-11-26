@@ -492,8 +492,21 @@ CX.importSync = function (t, m, rows) { const b = CX.beginImport(t, Object.assig
 const firstValid = (rec, k) => { const a = rec.f[k]; if (!a) return null; for (const x of a) if (x.valid) return x.value; return null; };
 const recName = rec => rec.type === 'organization' ? firstValid(rec, 'org_name') : firstValid(rec, 'full_name');
 const sameVal = (k, a, b) => k === 'full_name' ? nameSim(a, b) >= 0.85 : (k === 'org_name' ? nameSim(a, b, true) >= 0.9 : norm(a) === norm(b));
+// homônimos: mesma regra no cálculo completo e no passo global do servidor
+CX.homonymKey = function (r) { const nm = recName(r); if (!nm) return null; const k = r.type + ':' + (r.type === 'organization' ? orgKey(nm) : norm(nm)); if (r.type === 'person' && k.split(' ').length < 2) return null; return k; };
+const homCtx = r => { const o = firstValid(r, 'org_name'), e = firstValid(r, 'email'), c = firstValid(r, 'cep'), ci = firstValid(r, 'city'); const d = e && !FREE.has(e.split('@')[1]) ? e.split('@')[1] : null; return { o: o ? orgKey(o) : null, d, c, ci: ci ? norm(ci) : null }; };
+CX.homonymPair = function (A, B) {
+  const x = homCtx(A), y = homCtx(B), why = [];
+  if (A.type === 'person') { const da = firstValid(A, 'cpf'), db = firstValid(B, 'cpf'); if (da && db && da !== db) return null; if (x.o && x.o === y.o) why.push('Mesma organização'); if (x.d && x.d === y.d) why.push('Mesmo domínio corporativo'); if (x.c && x.c === y.c) why.push('Mesmo CEP'); }
+  else { const da = firstValid(A, 'cnpj'), db = firstValid(B, 'cnpj'); if (da && db && da !== db) return null; if (x.ci && x.ci === y.ci) why.push('Mesma cidade'); if (x.d && x.d === y.d) why.push('Mesmo domínio'); }
+  return why.length ? { score: Math.min(0.78, 0.56 + 0.08 * why.length), reasons: ['Mesmo nome, sem identificador forte em comum'].concat(why) } : null;
+};
 CX.rebuild = function (t) {
-  const t0 = Date.now(), recs = t.records, n = recs.length, cfg = t.config, idx = new Map();
+  if (t.serverMode && t.derived) return t.derived;  // perfis calculados no servidor
+  // ordem canônica (identificador do registro): o resultado não depende da ordem de chegada nem do lote
+  // em que o registro foi processado, então navegador e servidor chegam exatamente aos mesmos perfis
+  let recs = t.records; for (let i = 1; i < recs.length; i++) if (recs[i - 1].id > recs[i].id) { recs = recs.slice().sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0); break; }
+  const t0 = Date.now(), n = recs.length, cfg = t.config, idx = new Map(), bigKeys = t.bigKeys || null;
   recs.forEach((r, i) => idx.set(r.id, i));
   const parent = new Int32Array(n); for (let i = 0; i < n; i++) parent[i] = i;
   const find = x => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
@@ -519,7 +532,7 @@ CX.rebuild = function (t) {
     const key = pk(a, b), prev = evals.get(key); if (!prev || prev.score < score) evals.set(key, { a, b, score, reasons, key });
   };
   blocks.forEach((b, key) => {
-    if (b.length < 2) return; if (b.length > 200) { oversized++; return; }
+    if (b.length < 2) return; if (b.length > 200 || (bigKeys && bigKeys.has(key))) { oversized++; return; }
     const kt = key.slice(0, key.indexOf(':')), groups = new Map();
     for (const i of b) { const nm = recName(recs[i]); const g = nm ? (recs[i].type === 'organization' ? orgKey(nm) : norm(nm)) : '∅'; let a = groups.get(g); if (!a) groups.set(g, a = []); a.push(i); }
     const reps = []; groups.forEach(g => { reps.push(g[0]); for (let j = 1; j < g.length; j++) evaluate(g[0], g[j], kt); });
@@ -530,21 +543,19 @@ CX.rebuild = function (t) {
   // candidatos: faixa intermediária + homônimos com contexto compartilhado
   const cands = new Map(); const addCand = (a, b, score, reasons, key) => { const ra = find(a), rb = find(b); if (ra === rb || t.decisions.reject[key] || t.decisions.merge[key]) return; const ck = ra < rb ? ra + '|' + rb : rb + '|' + ra; const p = cands.get(ck); if (!p || p.score < score) cands.set(ck, { key, a: recs[a].id, b: recs[b].id, score, reasons }); };
   evals.forEach(e => { if (e.score < cfg.autoT && e.score >= cfg.reviewT) addCand(e.a, e.b, e.score, e.reasons, e.key); });
+  const keyCands = Array.from(cands.values());  // candidatos por chave forte (o servidor grava estes por componente)
   const nb = new Map();
-  for (let i = 0; i < n; i++) { const r = recs[i]; if (split[r.id]) continue; const nm = recName(r); if (!nm) continue; const k = r.type + ':' + (r.type === 'organization' ? orgKey(nm) : norm(nm)); if (r.type === 'person' && k.split(' ').length < 2) continue; let b = nb.get(k); if (!b) nb.set(k, b = []); b.push(i); }
-  const ctx = r => { const o = firstValid(r, 'org_name'), e = firstValid(r, 'email'), c = firstValid(r, 'cep'), ci = firstValid(r, 'city'); const d = e && !FREE.has(e.split('@')[1]) ? e.split('@')[1] : null; return { o: o ? orgKey(o) : null, d, c, ci: ci ? norm(ci) : null }; };
+  for (let i = 0; i < n; i++) { const r = recs[i]; if (split[r.id]) continue; const k = CX.homonymKey(r); if (!k) continue; let b = nb.get(k); if (!b) nb.set(k, b = []); b.push(i); }
   nb.forEach(b => {
     if (b.length < 2 || b.length > 40) return; const roots = new Map(); for (const i of b) { const r = find(i); if (!roots.has(r)) roots.set(r, i); }
     const reps = Array.from(roots.values()).slice(0, 12);
     for (let i = 0; i < reps.length; i++) for (let j = i + 1; j < reps.length; j++) {
-      const A = recs[reps[i]], B = recs[reps[j]], x = ctx(A), y = ctx(B), why = [];
-      if (A.type === 'person') { const da = firstValid(A, 'cpf'), db = firstValid(B, 'cpf'); if (da && db && da !== db) continue; if (x.o && x.o === y.o) why.push('Mesma organização'); if (x.d && x.d === y.d) why.push('Mesmo domínio corporativo'); if (x.c && x.c === y.c) why.push('Mesmo CEP'); }
-      else { const da = firstValid(A, 'cnpj'), db = firstValid(B, 'cnpj'); if (da && db && da !== db) continue; if (x.ci && x.ci === y.ci) why.push('Mesma cidade'); if (x.d && x.d === y.d) why.push('Mesmo domínio'); }
-      if (why.length) addCand(reps[i], reps[j], Math.min(0.78, 0.56 + 0.08 * why.length), ['Mesmo nome, sem identificador forte em comum'].concat(why), pk(reps[i], reps[j]));
+      const h = CX.homonymPair(recs[reps[i]], recs[reps[j]]); if (h) addCand(reps[i], reps[j], h.score, h.reasons, pk(reps[i], reps[j]));
     }
   });
   // clusters -> perfis
   const clusters = new Map(); for (let i = 0; i < n; i++) { const r = find(i); let c = clusters.get(r); if (!c) clusters.set(r, c = []); c.push(i); }
+  const amBy = new Map(); merged.forEach(e => { const r = find(e.a); amBy.set(r, (amBy.get(r) || 0) + 1); });
   const srcById = {}; t.sources.forEach(s => srcById[s.id] = s);
   const enrByRec = {}; t.enrich.forEach(e => { (enrByRec[e.record_id] = enrByRec[e.record_id] || []).push(e); });
   const profiles = [], recToEnt = {}, now = CX.now(), dq = cfg.dqi, dqSum = dq.completeness + dq.validity + dq.confidence + dq.freshness + dq.traceability || 1;
@@ -552,18 +563,18 @@ CX.rebuild = function (t) {
   clusters.forEach(members => {
     const anchor = recs[members[0]], type = members.some(i => recs[i].type === 'person') ? 'person' : 'organization';
     const p = { id: 'ent_' + hash(t.salt + anchor.id).slice(0, 10), anchor: anchor.id, type, record_ids: members.map(i => recs[i].id), sources: [], fields: {}, invalid: {}, missing: [], conflicts: [], enriched: false, flags: {} };
-    const ass = {}, xa = {}, srcSet = new Set(); let total = 0, validN = 0, traceN = 0, last = 0;
+    const ass = {}, xa = {}, srcSet = new Set(), fst = {}; let total = 0, validN = 0, traceN = 0, last = 0;
     for (const i of members) {
       const r = recs[i], s = srcById[r.source_id]; srcSet.add(r.source_id); if (r.observed_at > last) last = r.observed_at; if (r.flags && r.flags.injection) p.flags.injection = true;
       const complete = s && s.origin && s.owner && s.legal_basis && s.contract ? 1 : 0;
       for (const k in r.f) for (const x of r.f[k]) {
         if (k === 'created_at') continue;
-        if (CX.isCustom(k)) { (xa[k] = xa[k] || []).push({ value: x.value, valid: x.valid, note: x.note, source_id: r.source_id, record_id: r.id, observed_at: r.observed_at }); continue; } total++; fieldStats[k].assertions++; if (x.valid) { validN++; fieldStats[k].valid++; } else fieldStats[k][x.status === 'test' ? 'test' : 'invalid']++; traceN += complete;
+        if (CX.isCustom(k)) { (xa[k] = xa[k] || []).push({ value: x.value, valid: x.valid, note: x.note, source_id: r.source_id, record_id: r.id, observed_at: r.observed_at }); continue; } total++; fieldStats[k].assertions++; const fq = fst[k] = fst[k] || [0, 0, 0, 0]; fq[0]++; if (x.valid) { validN++; fieldStats[k].valid++; fq[1]++; } else { fieldStats[k][x.status === 'test' ? 'test' : 'invalid']++; fq[x.status === 'test' ? 3 : 2]++; } traceN += complete;
         (ass[k] = ass[k] || []).push({ field: k, value: x.value, raw: x.raw, valid: x.valid, status: x.status, note: x.note, source_id: r.source_id, record_id: r.id, observed_at: r.observed_at, method: 'Importação de arquivo', verification: x.valid ? 'validado por regra' : (x.status === 'test' ? 'dado de teste' : 'inválido'), rel: s ? s.reliability : 0.5, purposes: s ? s.purposes : [], confidence: x.valid ? Math.round((s ? s.reliability : 0.5) * 100) : 0 });
       }
       (enrByRec[r.id] || []).forEach(e => { p.enriched = true; (ass[e.field] = ass[e.field] || []).push({ field: e.field, value: e.value, raw: e.value, valid: true, status: 'valid', note: e.note, source_id: e.provider, record_id: r.id, observed_at: e.at, method: e.method, verification: e.synthetic ? 'sintético de demonstração, não verificado' : e.verification, rel: e.synthetic ? 0 : e.confidence, purposes: ['analytics', 'enrichment'], confidence: e.synthetic ? 0 : Math.round(e.confidence * 100), synthetic: !!e.synthetic, enrichment: true, run: e.run }); });
     }
-    p.sources = Array.from(srcSet); p.updated_at = last;
+    p.sources = Array.from(srcSet); p.updated_at = last; p.fstat = fst;
     // campos personalizados: valor mais recente vence; não entram nos indicadores de qualidade
     p.extra = {};
     for (const k in xa) { const ok = xa[k].filter(a => a.valid).sort((a, b) => b.observed_at - a.observed_at || (a.record_id < b.record_id ? 1 : -1)); if (!ok.length) continue; const distinct = new Set(ok.map(a => norm(a.value))); p.extra[k] = { value: ok[0].value, source_id: ok[0].source_id, record_id: ok[0].record_id, observed_at: ok[0].observed_at, values: distinct.size, alts: ok }; }
@@ -605,7 +616,7 @@ CX.rebuild = function (t) {
     let L = 0; if (em || ph || doc) L = 1; if (L && nameF && (em || ph)) L = 2; if (L === 2 && completeness >= 50) L = 3; if (L === 3 && completeness >= 65 && em && ph && (type === 'organization' || F('org_name'))) L = 4; if (L === 4 && completeness >= 80 && doc && !p.conflicts.length) L = 5;
     p.level = L; p.scores = { completeness: Math.round(completeness), validity: Math.round(validity), confidence: Math.round(confidence), freshness: Math.round(freshness), traceability: Math.round(traceability), dqi: Math.round(dqi), qualification: q, contactability };
     p.name = (nameF && nameF.value) || (F('org_name') && F('org_name').value) || (em && em.value) || (ph && ph.value) || p.id;
-    p.merged = members.length > 1; members.forEach(i => recToEnt[recs[i].id] = p.id); profiles.push(p);
+    p.merged = members.length > 1; p.autoMerges = amBy.get(find(members[0])) || 0; members.forEach(i => recToEnt[recs[i].id] = p.id); profiles.push(p);
   });
   // vínculos pessoa -> organização
   const orgIdx = new Map(); profiles.forEach(p => { if (p.type === 'organization' && p.fields.org_name) orgIdx.set(orgKey(p.fields.org_name.value), p); });
@@ -613,10 +624,70 @@ CX.rebuild = function (t) {
   const byId = {}; profiles.forEach(p => { byId[p.id] = p; p.stage = CX.resolveStage(t, p); });
   const avg = {}; ['completeness', 'validity', 'confidence', 'freshness', 'traceability', 'dqi', 'qualification', 'contactability'].forEach(k => avg[k] = profiles.length ? Math.round(profiles.reduce((s, p) => s + p.scores[k], 0) / profiles.length) : 0);
   const candidates = Array.from(cands.values()).sort((a, b) => b.score - a.score);
-  t.derived = { profiles, byId, recToEnt, candidates, autoMerges: merged.length, duplicates: n - profiles.length, fieldStats, avg, oversized, ms: Date.now() - t0, at: now };
+  t.derived = { profiles, byId, recToEnt, candidates, keyCands, autoMerges: merged.length, duplicates: n - profiles.length, fieldStats, avg, oversized, ms: Date.now() - t0, at: now };
   return t.derived;
 };
 CX.signature = t => hash(JSON.stringify(t.derived.profiles.map(p => [p.id, p.record_ids.length, p.level, p.scores.dqi, Object.keys(p.fields).sort().map(k => k + '=' + p.fields[k].value)])));
+/* ---------- perfis no servidor ----------
+   O servidor recalcula só os perfis afetados por registros novos (CX.rebuild num "mini tenant" com os registros
+   que compartilham chaves fortes) e guarda um cartão compacto por perfil. O navegador monta a visão a partir dos
+   cartões (CX.fromCards) e busca os registros só do perfil aberto. */
+CX.recordKeys = function (r) {
+  const keys = r.type === 'organization' ? ['cnpj', 'email', 'phone'] : ['cpf', 'email', 'phone'], out = [];
+  for (const k of keys) { const v = firstValid(r, k); if (v) out.push(k + ':' + v); }
+  return out;
+};
+const FLAG = { conflict: 1, stale: 2, synthetic: 4 };
+CX.card = function (p, extra) {
+  const f = {}; for (const k in p.fields) { const x = p.fields[k]; f[k] = [x.value, x.confidence, (x.conflict ? 1 : 0) | (x.stale ? 2 : 0) | (x.synthetic ? 4 : 0), x.source_id, x.observed_at, (x.permitted || []).join(','), x.justification || '', x.method || '', x.verification || ''] ; }
+  const inv = {}; for (const k in p.invalid) { const a = p.invalid[k]; inv[k] = [a.length, String(a[0].value == null ? a[0].raw || '' : a[0].value).slice(0, 80), a[0].note || '', a[0].source_id || '']; }
+  const x = {}; for (const k in p.extra || {}) x[k] = [p.extra[k].value, p.extra[k].values, p.extra[k].source_id, p.extra[k].observed_at];
+  return Object.assign({ t: p.type === 'organization' ? 'o' : 'p', n: p.name, l: p.level, s: [p.scores.completeness, p.scores.validity, p.scores.confidence, p.scores.freshness, p.scores.traceability, p.scores.dqi, p.scores.qualification, p.scores.contactability], src: p.sources, rc: p.record_ids.length, u: p.updated_at, f, inv, x, miss: p.missing, e: p.elig, ew: p.eligWhy || '', sup: p.suppressed ? 1 : 0, en: p.enriched ? 1 : 0, m: p.merged ? 1 : 0, an: p.anchor, fg: p.flags || {}, fs: p.fstat || null, am: p.autoMerges || 0 }, extra || {});
+};
+const SC = ['completeness', 'validity', 'confidence', 'freshness', 'traceability', 'dqi', 'qualification', 'contactability'];
+CX.fromCard = function (id, c) {
+  const fields = {}; for (const k in c.f) { const a = c.f[k]; fields[k] = { value: a[0], confidence: a[1], conflict: !!(a[2] & 1), stale: !!(a[2] & 2), synthetic: !!(a[2] & 4), source_id: a[3], observed_at: a[4], permitted: a[5] ? a[5].split(',') : [], justification: a[6], method: a[7], verification: a[8], alts: [] }; }
+  const invalid = {}; for (const k in c.inv || {}) { const a = c.inv[k]; invalid[k] = [{ field: k, value: a[1], raw: a[1], note: a[2], source_id: a[3], count: a[0] }]; }
+  const extra = {}; for (const k in c.x || {}) { const a = c.x[k]; extra[k] = { value: a[0], values: a[1], source_id: a[2], observed_at: a[3], alts: [] }; }
+  const scores = {}; SC.forEach((k, i) => scores[k] = c.s[i] || 0);
+  return { id, type: c.t === 'o' ? 'organization' : 'person', name: c.n, level: c.l, scores, sources: c.src || [], record_ids: [], record_count: c.rc || 0, updated_at: c.u, fields, invalid, extra, missing: c.miss || [], conflicts: Object.keys(fields).filter(k => fields[k].conflict), elig: c.e || {}, eligWhy: c.ew || '', suppressed: !!c.sup, enriched: !!c.en, merged: !!c.m, anchor: c.an, flags: c.fg || {}, first_import: c.fi || null, imports: c.ims || [], fstat: c.fs || null, autoMerges: c.am || 0, card: true };
+};
+// monta t.derived a partir dos cartões do servidor (mesma forma que CX.rebuild produz)
+// candidatos gravados pelo servidor -> mesma lista do CX.rebuild: um por par de perfis, maior pontuação,
+// em empate vale o de chave forte (avaliado antes no motor); ordem por pontuação
+CX.serverCandidates = function (t, rows) {
+  const by = new Map();
+  for (const kind of ['chave', 'nome']) for (const c of rows) {
+    if (c.kind !== kind || c.ent_a === c.ent_b || t.decisions.merge[c.pair_key] || t.decisions.reject[c.pair_key]) continue;
+    const ck = c.ent_a + '|' + c.ent_b, prev = by.get(ck), [a, b] = c.pair_key.split('|');
+    if (!prev || prev.score < c.score) by.set(ck, { key: c.pair_key, a, b, score: c.score, reasons: typeof c.reasons_json === 'string' ? JSON.parse(c.reasons_json) : (c.reasons_json || []), ea: c.ent_a, eb: c.ent_b });
+  }
+  return Array.from(by.values()).sort((x, y) => y.score - x.score);
+};
+CX.fromCards = function (t, rows, candidates, records, extra) {
+  const profiles = [], byId = {};
+  for (const r of rows) { const p = CX.fromCard(r.id, typeof r.card === 'string' ? JSON.parse(r.card) : r.card); byId[p.id] = p; profiles.push(p); }
+  CX.cardsDerived(t, profiles, byId, candidates, records, extra);
+  return t.derived;
+};
+CX.cardsDerived = function (t, profiles, byId, candidates, records, extra) {
+  const fieldStats = {}; CX.FIELDS.forEach(f => fieldStats[f.k] = { filled: 0, valid: 0, invalid: 0, test: 0, conflicts: 0, stale: 0, assertions: 0 });
+  // mesma ordem do CX.rebuild (pelo registro âncora), para empates e vínculos saírem iguais
+  profiles.sort((a, b) => a.anchor < b.anchor ? -1 : a.anchor > b.anchor ? 1 : 0);
+  const orgIdx = new Map(); profiles.forEach(p => { p.org_id = undefined; p.members = undefined; if (p.type === 'organization' && p.fields.org_name) orgIdx.set(CX.orgKey(p.fields.org_name.value), p); });
+  profiles.forEach(p => { if (p.type === 'person' && p.fields.org_name) { const o = orgIdx.get(CX.orgKey(p.fields.org_name.value)); if (o) { p.org_id = o.id; (o.members = o.members || []).push(p.id); } } });
+  for (const p of profiles) {
+    if (p.fstat) for (const k in p.fstat) { const fs = fieldStats[k]; if (!fs) continue; const a = p.fstat[k]; fs.assertions += a[0]; fs.valid += a[1]; fs.invalid += a[2]; fs.test += a[3] || 0; }
+    for (const k in p.fields) { const fs = fieldStats[k]; if (!fs || p.fields[k].synthetic) continue; fs.filled++; if (p.fields[k].conflict) fs.conflicts++; if (p.fields[k].stale) fs.stale++; }
+    p.stage = CX.resolveStage(t, p);
+  }
+  const avg = {}; ['completeness', 'validity', 'confidence', 'freshness', 'traceability', 'dqi', 'qualification', 'contactability'].forEach(k => avg[k] = profiles.length ? Math.round(profiles.reduce((s, p) => s + p.scores[k], 0) / profiles.length) : 0);
+  const n = records == null ? profiles.reduce((s, p) => s + p.record_count, 0) : records;
+  const am = profiles.reduce((s, p) => s + (p.autoMerges || 0), 0);
+  t.derived = { profiles, byId, recToEnt: {}, candidates: candidates || [], autoMerges: am, duplicates: Math.max(0, n - profiles.length), fieldStats, avg, oversized: (extra && extra.oversized) || 0, ms: 0, at: CX.now(), fromServer: true };
+  return t.derived;
+};
+
 CX.decide = function (t, key, action, actor) {
   if (action === 'merge') { t.decisions.merge[key] = { at: CX.now(), actor }; delete t.decisions.reject[key]; }
   else if (action === 'reject') { t.decisions.reject[key] = { at: CX.now(), actor }; delete t.decisions.merge[key]; }
@@ -639,7 +710,7 @@ function resolveProvider(t, prov, p) {
   if (prov.id === 'ddd_uf') { const ph = F('phone'); if (ph && ph.value.startsWith('+55') && !p.fields.state) out.push({ field: 'state', value: DDD[+ph.value.slice(3, 5)], note: 'UF da área de numeração do telefone, não é endereço confirmado', verification: 'derivado por tabela pública' }); }
   else if (prov.id === 'domain_site') { if (corp && !p.fields.website) out.push({ field: 'website', value: dom, note: 'Derivado do domínio do e-mail, existência do site não verificada', verification: 'derivado, não verificado' }); }
   else if (prov.id === 'master_link') {
-    if (p.type === 'person' && corp && !F('org_name')) { const o = t.derived.profiles.find(x => x.type === 'organization' && ((x.fields.website && x.fields.website.value === dom) || (x.fields.email && x.fields.email.value.split('@')[1] === dom))); if (o && o.fields.org_name) { out.push({ field: 'org_name', value: o.fields.org_name.value, note: 'Domínio do e-mail coincide com organização ' + o.id, verification: 'correspondência exata de domínio no master' }); if (o.fields.segment && !p.fields.segment) out.push({ field: 'segment', value: o.fields.segment.value, note: 'Herdado da organização ' + o.id, verification: 'correspondência exata de domínio no master' }); } }
+    if (p.type === 'person' && corp && !F('org_name')) { const o = (t.orgProfiles || t.derived.profiles).find(x => x.type === 'organization' && ((x.fields.website && x.fields.website.value === dom) || (x.fields.email && x.fields.email.value.split('@')[1] === dom))); if (o && o.fields.org_name) { out.push({ field: 'org_name', value: o.fields.org_name.value, note: 'Domínio do e-mail coincide com organização ' + o.id, verification: 'correspondência exata de domínio no master' }); if (o.fields.segment && !p.fields.segment) out.push({ field: 'segment', value: o.fields.segment.value, note: 'Herdado da organização ' + o.id, verification: 'correspondência exata de domínio no master' }); } }
   } else if (prov.id === 'demo_b2b') { if (em && !p.fields.job_title) out.push({ field: 'job_title', value: DEMO_TITLES[parseInt(hash(p.id).slice(0, 4), 16) % DEMO_TITLES.length], note: 'Valor sintético gerado localmente', verification: 'sintético', synthetic: true }); }
   return out;
 }

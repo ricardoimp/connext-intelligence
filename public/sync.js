@@ -56,7 +56,8 @@ function tables(t, prev) {
   if (d && (!prev || prev.derived !== d)) {
     T.identity_match_candidates = d.candidates.map(c => ({ pair_key: c.key, score: Math.round(c.score * 1000) / 1000, reasons_json: c.reasons, status: 'pendente', updated_at: d.at }));
     T.canonical_entities = []; T.golden_profile_versions = [];
-    for (const p of d.profiles) {
+    if (t.profilesMode && t.profilesMode !== 'browser') { delete T.canonical_entities; delete T.golden_profile_versions; delete T.identity_match_candidates; }
+    else for (const p of d.profiles) {
       const g = golden(p), sig = CX.hash(j([p.type, p.level, p.scores, p.record_ids, g]));
       T.canonical_entities.push({ id: p.id, entity_type: p.type, name: p.name, level: p.level, dqi: p.scores.dqi, completeness: p.scores.completeness, confidence: p.scores.confidence, freshness: p.scores.freshness, qualification: p.scores.qualification, contactability: p.scores.contactability, record_count: p.record_ids.length, org_id: p.org_id || null, suppressed: p.suppressed ? 1 : 0, elig_json: p.elig, sources_json: p.sources, golden_json: g, sig, updated_at: p.updated_at, _recs: p.record_ids });
       T.golden_profile_versions.push({ entity_id: p.id, sig, golden_json: g, scores_json: p.scores, at: d.at });
@@ -123,6 +124,8 @@ async function push(t, onProgress) {
   const st = t._sync; for (const tb in dd.next) st.maps[tb] = dd.next[tb];
   if (dd.T.canonical_entities) { st.entRecs.clear(); for (const r of dd.T.canonical_entities) st.entRecs.set(r.id, r._recs); st.derived = t.derived; }
   st.cfg = dd.cfg;
+  // perfis no servidor: registros já gravados saem da memória do navegador (o servidor calcula os perfis)
+  if (t.serverMode && t.records.length && !t._holdRecords) { const m = st.maps.source_records; t.records.forEach(r => { if (m) m.delete(r.id); }); t.recordCount = (t.recordCount || 0) + t.records.length; t.records = []; }
   return { written, denied };
 }
 
@@ -136,6 +139,16 @@ async function pullChanges(t) {
   for (const i of d.imports) { if (haveImp.has(i.id)) continue; const x = parse(i.data_json, {}); t.imports.push({ id: i.id, sourceId: i.source_id, fileName: i.file_name, fileHash: i.file_hash, format: i.format, encoding: i.encoding, bytes: i.bytes, version: i.version, at: i.at, actor: i.actor, status: i.status, mapping: x.mapping || {}, columnNames: x.columnNames || null, total: i.total, cursor: x.cursor || i.total, parseErrors: x.parseErrors || [], rowErrors: x.rowErrors || [], st: x.st || { received: i.received, extracted: i.received, mapped: i.normalized, normalized: i.normalized, validated: i.validated }, ms: x.ms || { extract: 0, normalize: 0, resolve: 0 }, recIds: [], raw_key: i.raw_key, provenance: parse(i.provenance_json, null), raw_sha256: i.raw_sha256, ai_analysis_id: i.ai_analysis_id, decision: parse(i.decision_json, null) }); imps++; }
   for (const c of d.customFields || []) if (!(t.customFields || []).some(x => x.k === c.field_key)) (t.customFields = t.customFields || []).push({ k: c.field_key, label: c.label, type: c.data_type, origin_column: c.origin_column, source_id: c.source_id, import_id: c.import_id, created_by: c.created_by, created_at: c.created_at });
   t._pullAt = d.more && d.rows.length ? d.rows[d.rows.length - 1].created_at : d.now;
+  if (t.serverMode) {
+    let changed = 0; const der = t.derived;
+    if (d.stats) { t.stats = d.stats; t.recordCount = d.stats.records; changed++; }
+    t.queue = d.queue || 0;
+    for (const e of d.entities || []) { const p = CX.fromCard(e.id, e.card); if (!der.byId[p.id]) der.profiles.push(p); else der.profiles[der.profiles.indexOf(der.byId[p.id])] = p; der.byId[p.id] = p; changed++; }
+    if ((d.gone || []).length) { const g = new Set(d.gone); der.profiles = der.profiles.filter(p => !g.has(p.id)); g.forEach(id => delete der.byId[id]); changed++; }
+    if (d.cands) { t.rawCands = d.cands; changed++; }
+    if (changed) CX.cardsDerived(t, der.profiles, der.byId, CX.serverCandidates(t, t.rawCands || []), t.recordCount, { oversized: (t.stats || {}).oversized || 0 });
+    return { added: (d.entities || []).length, imports: imps, more: false, profiles: changed };
+  }
   if (added || imps) {
     CX.rebuild(t);
     // o que veio do servidor já está gravado: entra na linha de base para não ser reenviado
@@ -193,6 +206,21 @@ async function loadTenant(id, role, onProgress) {
   t.audit = d.audit.map(a => ({ id: a.id, at: a.at, actor: a.actor, action: a.action, detail: a.detail, ref: a.ref }));
   t.customFields = (d.customFields || []).map(c => ({ k: c.field_key, label: c.label, type: c.data_type, origin_column: c.origin_column, source_id: c.source_id, import_id: c.import_id, created_by: c.created_by, created_at: c.created_at }));
   (d.stages || []).forEach(x => { t.stages[x.entity_id] = { stage: x.stage, method: x.method, confidence: x.confidence, reason: x.reason, sig: x.sig, model: x.model, actor: x.actor, at: x.at }; });
+  t.profilesMode = d.profilesMode || 'browser'; t.stats = d.stats || null; t.queue = d.queue || 0; t.recordCount = d.records;
+  if (t.profilesMode === 'server') {
+    // perfis prontos do servidor: o navegador não baixa os registros
+    t.serverMode = true; const rows = []; let after = '';
+    while (true) {
+      const r = await call('GET', '/t/' + encodeURIComponent(id) + '/profiles?limit=20000&after=' + encodeURIComponent(after));
+      rows.push(...r.rows); if (onProgress) onProgress(rows.length, d.records, 'perfis');
+      if (!r.next) break; after = r.next;
+    }
+    t.rawCands = d.candidates || [];
+    CX.fromCards(t, rows, CX.serverCandidates(t, t.rawCands), d.records, { oversized: (d.stats || {}).oversized || 0 });
+    t._pullAt = d.now || Date.now();
+    snapshot(t, tables(t, null)); t._sync.derived = t.derived;
+    return t;
+  }
   let after = '', got = 0;
   while (true) {
     const r = await call('GET', '/t/' + encodeURIComponent(id) + '/records?limit=5000&after=' + encodeURIComponent(after));
@@ -222,6 +250,11 @@ root.CXSync = {
   },
   session: () => S.session,
   loadTenant, push, pullChanges,
+  profilesStatus: tid => call('GET', '/t/' + encodeURIComponent(tid) + '/profiles-status'),
+  entity: (tid, q) => call('GET', '/t/' + encodeURIComponent(tid) + '/entity?' + (q.id ? 'id=' + encodeURIComponent(q.id) : 'records=' + encodeURIComponent(q.records.join(',')))),
+  reprocess: (tid, body) => call('POST', '/t/' + encodeURIComponent(tid) + '/reprocess', body),
+  erase: (tid, body) => call('POST', '/t/' + encodeURIComponent(tid) + '/erase', body),
+  recOf: x => { const p = parse(x.payload_json, {}); return { id: x.id, source_id: x.source_id, import_id: x.import_id, row: x.row_num, f: p.f || {}, flags: p.flags || null, origin: p.origin || null, observed_at: x.observed_at, type: x.entity_type, entity_id: x.entity_id }; },
   createTenant: name => call('POST', '/tenants', { name }),
   members: tid => call('GET', '/t/' + encodeURIComponent(tid) + '/members').then(r => r.members),
   setMember: (tid, email, role) => call('POST', '/t/' + encodeURIComponent(tid) + '/members', { email, role }),

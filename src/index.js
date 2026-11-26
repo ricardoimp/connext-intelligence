@@ -7,6 +7,7 @@ import { analyzeSource, classifyStages, aiBudget, aiReport } from './ai.js';
 import { TYPES, fetchBatch } from './connectors.js';
 import { seal, open, sha256 } from './vault.js';
 import { serverImport } from './ingest.js';
+import { processQueue, refreshStats, enqueue } from './profiles.js';
 
 const JSONH = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: JSONH });
@@ -124,17 +125,18 @@ async function member(env, tid, email) {
 /* ---------- carga do tenant ---------- */
 async function load(env, tid) {
   const q = (sql, ...b) => env.DB.prepare(sql).bind(tid, ...b).all().then(r => r.results);
-  const tenant = await env.DB.prepare('SELECT id, name, salt, config_json, spend, seq, cache_hits, created_at FROM tenants WHERE id = ?').bind(tid).first();
+  const tenant = await env.DB.prepare('SELECT id, name, salt, config_json, spend, seq, cache_hits, created_at, profiles_mode FROM tenants WHERE id = ?').bind(tid).first();
+  const serverMode = tenant && tenant.profiles_mode === 'server';
   const [sources, imports, decisions, candidates, mappings, snapshots, models, runs, results, cache, execs, segs, supp, erased, auditRows, count] = await Promise.all([
     q('SELECT * FROM data_sources WHERE tenant_id = ? ORDER BY created_at'),
     q('SELECT * FROM import_jobs WHERE tenant_id = ? ORDER BY at'),
     q('SELECT pair_key, kind, actor, at FROM identity_decisions WHERE tenant_id = ?'),
-    q('SELECT pair_key FROM identity_match_candidates WHERE tenant_id = ?'),
+    serverMode ? q("SELECT pair_key, score, reasons_json, ent_a, ent_b, kind FROM identity_match_candidates WHERE tenant_id = ? AND status = 'pendente' AND ent_a IS NOT NULL") : q('SELECT pair_key FROM identity_match_candidates WHERE tenant_id = ?'),
     q('SELECT * FROM mapping_templates WHERE tenant_id = ?'),
     q('SELECT * FROM data_quality_assessments WHERE tenant_id = ? ORDER BY at'),
     q('SELECT * FROM scoring_models WHERE tenant_id = ? ORDER BY version'),
     q('SELECT * FROM enrichment_requests WHERE tenant_id = ? ORDER BY at'),
-    q('SELECT * FROM enrichment_results WHERE tenant_id = ?'),
+    serverMode ? Promise.resolve([]) : q('SELECT * FROM enrichment_results WHERE tenant_id = ?'),
     q('SELECT cache_key FROM enrichment_cache WHERE tenant_id = ?'),
     q('SELECT * FROM (SELECT * FROM workflow_executions WHERE tenant_id = ? ORDER BY at DESC LIMIT 500) ORDER BY at'),
     q('SELECT * FROM segments WHERE tenant_id = ? ORDER BY at'),
@@ -143,17 +145,46 @@ async function load(env, tid) {
     q('SELECT * FROM (SELECT * FROM audit_events WHERE tenant_id = ? ORDER BY at DESC LIMIT 2000) ORDER BY at'),
     env.DB.prepare('SELECT COUNT(*) AS n FROM source_records WHERE tenant_id = ?').bind(tid).first()
   ]);
-  const entities = await env.DB.prepare('SELECT id, sig FROM canonical_entities WHERE tenant_id = ?').bind(tid).all().then(r => r.results);
+  const entities = serverMode ? [] : await env.DB.prepare('SELECT id, sig FROM canonical_entities WHERE tenant_id = ?').bind(tid).all().then(r => r.results);
+  const stats = await env.DB.prepare('SELECT stats_json FROM tenant_stats WHERE tenant_id = ?').bind(tid).first();
+  const queue = await env.DB.prepare('SELECT COUNT(*) AS n FROM profile_queue WHERE tenant_id = ?').bind(tid).first();
   const stages = await env.DB.prepare('SELECT entity_id, stage, method, confidence, reason, sig, model, actor, at FROM lead_stages WHERE tenant_id = ?').bind(tid).all().then(r => r.results);
   const customFields = await env.DB.prepare('SELECT * FROM custom_fields WHERE tenant_id = ? ORDER BY created_at').bind(tid).all().then(r => r.results);
-  return { ok: true, now: now(), stages, customFields, tenant, sources, imports, decisions, candidates, mappings, snapshots, models, runs, results, cache, execs, segs, supp, erased, audit: auditRows, entities, records: count.n };
+  return { ok: true, now: now(), stages, customFields, tenant, sources, imports, decisions, candidates, mappings, snapshots, models, runs, results, cache, execs, segs, supp, erased, audit: auditRows, entities, records: count.n, profilesMode: tenant ? tenant.profiles_mode : 'server', stats: stats && stats.stats_json ? JSON.parse(stats.stats_json) : null, queue: queue.n };
 }
 
 /* ---------- sincronização ---------- */
 async function sync(env, tid, email, role, body) {
-  const stmts = [], denied = [], okImports = new Set();
+  const stmts = [], denied = [], okImports = new Set(), toQueue = new Set(), delRecs = []; let reprocessAll = false;
+  const mode = (await env.DB.prepare('SELECT profiles_mode FROM tenants WHERE id = ?').bind(tid).first() || {}).profiles_mode || 'browser';
   for (const op of body.ops || []) {
     const def = TABLES[op.t]; if (!def) { denied.push(op.t + ': tabela desconhecida'); continue; }
+    // perfis são calculados no servidor: o navegador não grava perfis, histórico nem pares de revisão
+    if (mode !== 'browser' && (op.t === 'canonical_entities' || op.t === 'golden_profile_versions' || op.t === 'identity_match_candidates')) continue;
+    if (mode !== 'browser' && op.op === 'upsert') {
+      if (op.t === 'enrichment_results') (op.rows || []).forEach(r => toQueue.add(r.record_id));
+      if (op.t === 'identity_decisions') (op.rows || []).forEach(r => String(r.pair_key || '').split('|').forEach(x => x && toQueue.add(x)));
+    }
+    if (mode !== 'browser' && op.op === 'delete' && op.t === 'identity_decisions') (op.keys || []).forEach(k => String(Array.isArray(k) ? k[0] : k).split('|').forEach(x => x && toQueue.add(x)));
+    if (mode !== 'browser') {
+      // separar ou desfazer separação muda a contagem dos blocos: recalcula quem divide chave com o registro
+      const splitIds = op.t !== 'identity_decisions' ? [] : op.op === 'upsert' ? (op.rows || []).filter(r => r.kind === 'split').map(r => r.pair_key) : (op.keys || []).filter(k => Array.isArray(k) && k[1] === 'split').map(k => k[0]);
+      splitIds.forEach(id => stmts.push(env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, record_id, NULL, ? FROM record_keys WHERE tenant_id = ? AND k IN (SELECT k FROM record_keys WHERE tenant_id = ? AND record_id = ?) ON CONFLICT (tenant_id, record_id) DO NOTHING').bind(now(), tid, tid, String(id))));
+      if (op.t === 'data_sources' && op.op === 'upsert') (op.rows || []).forEach(r => stmts.push(env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, id, NULL, ? FROM source_records WHERE tenant_id = ? AND source_id = ? ON CONFLICT (tenant_id, record_id) DO NOTHING').bind(now(), tid, String(r.id))));
+      if (op.t === 'suppression_registry') reprocessAll = true;
+      if (op.t === 'enrichment_results' && op.op === 'delete') (op.keys || []).forEach(k => stmts.push(env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, record_id, NULL, ? FROM enrichment_results WHERE tenant_id = ? AND id = ? ON CONFLICT (tenant_id, record_id) DO NOTHING').bind(now(), tid, String(Array.isArray(k) ? k[0] : k))));
+      if (op.t === 'source_records' && op.op === 'delete' && can(role, 'import')) for (const k of op.keys || []) {
+        // registro excluído: recalcula o restante do perfil e quem dividia chave com ele; perfil vazio vira lápide
+        const id = String(Array.isArray(k) ? k[0] : k), t = now();
+        stmts.push(env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, id, NULL, ? FROM source_records WHERE tenant_id = ? AND id <> ? AND entity_id = (SELECT entity_id FROM source_records WHERE tenant_id = ? AND id = ?) ON CONFLICT (tenant_id, record_id) DO NOTHING').bind(t, tid, id, tid, id));
+        stmts.push(env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, record_id, NULL, ? FROM record_keys WHERE tenant_id = ? AND record_id <> ? AND k IN (SELECT k FROM record_keys WHERE tenant_id = ? AND record_id = ?) ON CONFLICT (tenant_id, record_id) DO NOTHING').bind(t, tid, id, tid, id));
+        delRecs.push(id);
+        stmts.push(env.DB.prepare('DELETE FROM record_keys WHERE tenant_id = ? AND record_id = ?').bind(tid, id));
+        stmts.push(env.DB.prepare('DELETE FROM record_names WHERE tenant_id = ? AND record_id = ?').bind(tid, id));
+        stmts.push(env.DB.prepare('DELETE FROM profile_queue WHERE tenant_id = ? AND record_id = ?').bind(tid, id));
+        toQueue.delete(id);
+      }
+    }
     if (op.op === 'upsert') {
       if (def.need && !can(role, def.need)) { denied.push(op.t); continue; }
       const cols = ['tenant_id'].concat(def.cols);
@@ -172,6 +203,7 @@ async function sync(env, tid, email, role, body) {
         for (let i = 0; i < need.length; i += 90) { const part = need.slice(i, i + 90); (await env.DB.prepare('SELECT id FROM import_jobs WHERE tenant_id = ? AND provenance_json IS NOT NULL AND id IN (' + part.map(() => '?').join(',') + ')').bind(tid, ...part).all()).results.forEach(x => okImports.add(x.id)); }
         const bad = rows.filter(r => r.import_id && !okImports.has(r.import_id)); if (bad.length) denied.push(bad.length + ' registro(s) de importação sem comprovante de origem');
         rows = rows.filter(r => !r.import_id || okImports.has(r.import_id));
+        if (mode !== 'browser') rows.forEach(r => toQueue.add(r.id));  // só registros aceitos entram na fila
       }
       for (const row of rows) {
         const vals = [tid].concat(def.cols.map(c => { const v = row[c]; return v === undefined ? null : (typeof v === 'object' && v !== null ? JSON.stringify(v) : v); }));
@@ -192,12 +224,23 @@ async function sync(env, tid, email, role, body) {
   if (body.tenant) {
     const cur = await env.DB.prepare('SELECT config_json FROM tenants WHERE id = ?').bind(tid).first();
     const cfg = body.tenant.config_json != null ? JSON.stringify(body.tenant.config_json) : null;
+    if (cfg && cfg !== cur.config_json && mode !== 'browser' && can(role, 'config')) reprocessAll = true;  // limiares e pesos valem para todos os perfis
     if (cfg && cfg !== cur.config_json && !can(role, 'config') && cur.config_json !== '{}') denied.push('configuração');
     else if (role !== 'leitor') stmts.push(env.DB.prepare('UPDATE tenants SET config_json = COALESCE(?, config_json), spend = COALESCE(?, spend), seq = MAX(seq, COALESCE(?, 0)), cache_hits = COALESCE(?, cache_hits), updated_at = ? WHERE id = ?')
       .bind(cfg, body.tenant.spend ?? null, body.tenant.seq ?? null, body.tenant.cache_hits ?? null, now(), tid));
   }
+  // perfis que ficaram sem nenhum registro depois das exclusões viram lápide (avaliado depois de todas as exclusões)
+  if (delRecs.length) {
+    const ents = []; for (let i = 0; i < delRecs.length; i += 90) { const part = delRecs.slice(i, i + 90); ents.push(...(await env.DB.prepare('SELECT DISTINCT entity_id FROM source_records WHERE tenant_id = ? AND entity_id IS NOT NULL AND id IN (' + part.map(() => '?').join(',') + ')').bind(tid, ...part).all()).results.map(x => x.entity_id)); }
+    const t2 = now(); Array.from(new Set(ents)).forEach(e => {
+      stmts.push(env.DB.prepare('INSERT OR REPLACE INTO entity_tombstones (tenant_id, id, at) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM source_records WHERE tenant_id = ? AND entity_id = ?)').bind(tid, e, t2, tid, e));
+      stmts.push(env.DB.prepare('DELETE FROM canonical_entities WHERE tenant_id = ? AND id = ? AND NOT EXISTS (SELECT 1 FROM source_records WHERE tenant_id = ? AND entity_id = ?)').bind(tid, e, tid, e));
+    });
+  }
+  const qt = now(); if (reprocessAll) stmts.push(env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, id, NULL, ? FROM source_records WHERE tenant_id = ? ON CONFLICT (tenant_id, record_id) DO NOTHING').bind(qt, tid));
+  toQueue.forEach(id => stmts.push(env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at) VALUES (?,?,NULL,?) ON CONFLICT (tenant_id, record_id) DO NOTHING').bind(tid, id, qt)));
   await runBatch(env, stmts);
-  return { ok: true, written: stmts.length, denied };
+  return { ok: true, written: stmts.length, denied, queued: toQueue.size + (reprocessAll ? 1 : 0) };
 }
 
 /* ---------- conectores ---------- */
@@ -209,6 +252,7 @@ async function runConnector(env, tid, c, actor) {
     const data = await fetchBatch(c.type, JSON.parse(c.config_json || '{}'), secret, c.cursor);
     if (!data.rows.length) { res = { fetched: 0, records: 0, more: false, ms: now() - t0, skipped: true, reason: 'nenhum registro novo' }; await env.DB.prepare('UPDATE connectors SET cursor = ?, last_sync_at = ?, last_result_json = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(data.cursor || c.cursor, now(), JSON.stringify(res), tid, c.id).run(); return res; }
     const out = await serverImport(env, tid, c, data, c.name + ' · ' + new Date().toISOString().slice(0, 16).replace('T', ' '), actor, { canal: 'conector ' + c.type, executado_por: actor, cursor_anterior: c.cursor || null, cursor_novo: data.cursor || null, paginas: data.pages || null, origem_declarada: data.meta || null });
+    if (out.import_id) await env.DB.prepare('INSERT OR IGNORE INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, id, NULL, ? FROM source_records WHERE tenant_id = ? AND import_id = ?').bind(now(), tid, out.import_id).run();
     res = Object.assign({ fetched: data.rows.length, more: !!data.more, ms: now() - t0 }, out);
     await env.DB.prepare('UPDATE connectors SET cursor = ?, last_sync_at = ?, last_result_json = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(data.fullSnapshot ? c.cursor : (data.cursor || c.cursor), data.more ? now() - c.schedule_minutes * 60000 : now(), JSON.stringify(res), tid, c.id).run();
     return res;
@@ -233,6 +277,7 @@ async function webhook(req, env, url) {
   try {
     const cf = req.cf || {};
     const out = await serverImport(env, tid, c, p, c.name + ' · webhook ' + new Date().toISOString().slice(0, 19).replace('T', ' '), 'conector:' + c.id, { canal: 'webhook', ip: req.headers.get('cf-connecting-ip') || null, cidade: cf.city || null, regiao: cf.region || null, pais: cf.country || null, provedor: cf.asOrganization || null, asn: cf.asn || null, datacenter_cloudflare: cf.colo || null, navegador: (req.headers.get('user-agent') || '').slice(0, 240), requisicao_cloudflare: req.headers.get('cf-ray') || null });
+    if (out.import_id) await env.DB.prepare('INSERT OR IGNORE INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, id, NULL, ? FROM source_records WHERE tenant_id = ? AND import_id = ?').bind(now(), tid, out.import_id).run();
     await env.DB.prepare('UPDATE connectors SET last_sync_at = ?, last_result_json = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(now(), JSON.stringify(out), tid, c.id).run();
     await usage(env, tid, 'POST webhook');
     return json(Object.assign({ ok: true }, out), 202);
@@ -244,7 +289,7 @@ async function webhook(req, env, url) {
 
 /* ---------- roteador ---------- */
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
     // domínio de entrada: só recebe webhooks, sem interface e sem login do Access
     if (url.pathname.startsWith('/in/')) return webhook(req, env, url);
@@ -287,7 +332,19 @@ export default {
           const until = rows.length === limit ? rows[rows.length - 1].created_at : null;
           const imports = (await env.DB.prepare('SELECT * FROM import_jobs WHERE tenant_id = ? AND at > ? ORDER BY at').bind(tid, since - 600000).all()).results;
           const customFields = (await env.DB.prepare('SELECT * FROM custom_fields WHERE tenant_id = ? AND created_at > ?').bind(tid, since - 600000).all()).results;
-          return json({ ok: true, rows, imports, customFields, more: !!until, now: now() });
+          // perfis recalculados pelo servidor desde a última leitura, perfis removidos (fundidos/eliminados) e indicadores
+          const tn = await env.DB.prepare('SELECT profiles_mode FROM tenants WHERE id = ?').bind(tid).first();
+          let ents = [], gone = [], stats = null, queue = 0, cands = null;
+          if (tn && tn.profiles_mode === 'server') {
+            ents = (await env.DB.prepare('SELECT id, card_json FROM canonical_entities WHERE tenant_id = ? AND updated_at > ? AND card_json IS NOT NULL ORDER BY updated_at LIMIT 20000').bind(tid, since).all()).results.map(e => ({ id: e.id, card: JSON.parse(e.card_json) }));
+            gone = (await env.DB.prepare('SELECT id FROM entity_tombstones WHERE tenant_id = ? AND at > ?').bind(tid, since).all()).results.map(x => x.id);
+            if (ents.length || gone.length || (await env.DB.prepare('SELECT 1 AS x FROM identity_match_candidates WHERE tenant_id = ? AND updated_at > ? LIMIT 1').bind(tid, since).first())) cands = (await env.DB.prepare("SELECT pair_key, score, reasons_json, ent_a, ent_b, kind FROM identity_match_candidates WHERE tenant_id = ? AND status = 'pendente' AND ent_a IS NOT NULL").bind(tid).all()).results;
+            const st = await env.DB.prepare('SELECT stats_json, at FROM tenant_stats WHERE tenant_id = ?').bind(tid).first(); if (st && st.at > since && st.stats_json) stats = JSON.parse(st.stats_json);
+            queue = (await env.DB.prepare('SELECT COUNT(*) AS n FROM profile_queue WHERE tenant_id = ?').bind(tid).first()).n;
+            if (queue && ctx) ctx.waitUntil(processQueue(env, tid, 20000).catch(e => console.error('fila: ' + e.message)));
+            if (ctx) ctx.waitUntil(refreshStats(env, tid).catch(e => console.error('indicadores: ' + e.message)));
+          }
+          return json({ ok: true, rows: tn && tn.profiles_mode === 'server' ? [] : rows, imports, customFields, entities: ents, gone, cands, stats, queue, mode: tn && tn.profiles_mode, more: !!until && !(tn && tn.profiles_mode === 'server'), now: now() });
         }
         if (sub === 'records' && req.method === 'GET') {
           const after = url.searchParams.get('after') || '', limit = Math.min(5000, +url.searchParams.get('limit') || 2000);
@@ -295,7 +352,66 @@ export default {
           return json({ ok: true, rows, next: rows.length === limit ? rows[rows.length - 1].id : null });
         }
 
-        if (sub === 'sync' && req.method === 'POST') return json(await sync(env, tid, user.email, role, await req.json()));
+        if (sub === 'sync' && req.method === 'POST') { const r = await sync(env, tid, user.email, role, await req.json()); if (r.queued && ctx) ctx.waitUntil(processQueue(env, tid, 20000).catch(e => console.error('fila: ' + e.message))); return json(r); }
+        // ---------- perfis calculados no servidor ----------
+        if (sub === 'profiles' && req.method === 'GET') {
+          // cartões compactos paginados; monta a resposta sem reprocessar o JSON de cada cartão
+          const after = url.searchParams.get('after') || '', limit = Math.min(25000, +url.searchParams.get('limit') || 20000);
+          const rows = (await env.DB.prepare('SELECT id, card_json FROM canonical_entities WHERE tenant_id = ? AND id > ? AND card_json IS NOT NULL ORDER BY id LIMIT ?').bind(tid, after, limit).all()).results;
+          const body = '{"ok":true,"next":' + (rows.length === limit ? JSON.stringify(rows[rows.length - 1].id) : 'null') + ',"rows":[' + rows.map(r => '{"id":' + JSON.stringify(r.id) + ',"card":' + r.card_json + '}').join(',') + ']}';
+          return new Response(body, { headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+        }
+        if (sub === 'profiles-status' && req.method === 'GET') {
+          const [tn, q, st] = await Promise.all([env.DB.prepare('SELECT profiles_mode FROM tenants WHERE id = ?').bind(tid).first(), env.DB.prepare('SELECT COUNT(*) AS n FROM profile_queue WHERE tenant_id = ?').bind(tid).first(), env.DB.prepare('SELECT at, dirty FROM tenant_stats WHERE tenant_id = ?').bind(tid).first()]);
+          if (q.n && ctx) ctx.waitUntil(processQueue(env, tid, 20000).catch(e => console.error('fila: ' + e.message)));
+          return json({ ok: true, mode: tn.profiles_mode, queue: q.n, stats_at: st && st.at });
+        }
+        if (sub === 'entity' && req.method === 'GET') {
+          // registros, enriquecimentos e etapa de um perfil: o navegador recalcula o detalhe só deste perfil
+          const eid = url.searchParams.get('id') || '', ids = (url.searchParams.get('records') || '').split(',').filter(Boolean).slice(0, 200);
+          let rows;
+          if (eid) rows = (await env.DB.prepare('SELECT id, source_id, import_id, row_num, entity_type, observed_at, payload_json, entity_id FROM source_records WHERE tenant_id = ? AND entity_id = ? LIMIT 2000').bind(tid, eid).all()).results;
+          else { rows = []; for (let i = 0; i < ids.length; i += 90) { const part = ids.slice(i, i + 90); rows.push(...(await env.DB.prepare('SELECT id, source_id, import_id, row_num, entity_type, observed_at, payload_json, entity_id FROM source_records WHERE tenant_id = ? AND id IN (' + part.map(() => '?').join(',') + ')').bind(tid, ...part).all()).results); } }
+          const rids = rows.map(r => r.id), enr = [];
+          for (let i = 0; i < rids.length; i += 90) { const part = rids.slice(i, i + 90); enr.push(...(await env.DB.prepare('SELECT * FROM enrichment_results WHERE tenant_id = ? AND record_id IN (' + part.map(() => '?').join(',') + ')').bind(tid, ...part).all()).results); }
+          return json({ ok: true, rows, results: enr });
+        }
+        if (sub === 'reprocess' && req.method === 'POST') {
+          if (!can(role, 'merge') && !can(role, 'enrich')) return fail(403, 'Seu papel não permite reprocessar perfis.');
+          const b = await req.json(), op = b.op ? String(b.op).slice(0, 200) : null, t = now();
+          if (b.all) await env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, id, ?, ? FROM source_records WHERE tenant_id = ? ON CONFLICT (tenant_id, record_id) DO UPDATE SET op = COALESCE(excluded.op, profile_queue.op)').bind(op, t, tid).run();
+          else {
+            const ents = (b.entity_ids || []).slice(0, 5000), recs = (b.record_ids || []).slice(0, 20000);
+            for (let i = 0; i < ents.length; i += 90) { const part = ents.slice(i, i + 90); await env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, id, ?, ? FROM source_records WHERE tenant_id = ? AND entity_id IN (' + part.map(() => '?').join(',') + ') ON CONFLICT (tenant_id, record_id) DO UPDATE SET op = COALESCE(excluded.op, profile_queue.op)').bind(op, t, tid, ...part).run(); }
+            if (recs.length) await enqueue(env, tid, recs, op);
+          }
+          await audit(env, tid, user.email, 'perfis_reprocessar', b.all ? 'todos os registros' : ((b.entity_ids || []).length + ' perfil(is), ' + (b.record_ids || []).length + ' registro(s)') + (op ? ' · ' + op : ''), null);
+          if (ctx) ctx.waitUntil(processQueue(env, tid, 20000).catch(e => console.error('fila: ' + e.message)));
+          return json({ ok: true });
+        }
+        if (sub === 'erase' && req.method === 'POST') {
+          // eliminação de titular no servidor: registros, chaves, perfil, histórico, etapa e enriquecimentos
+          if (!can(role, 'govern')) return fail(403, 'Seu papel não permite eliminar dados de titular.');
+          const b = await req.json(), eid = String(b.entity_id || ''); if (!eid) return fail(400, 'Perfil não informado.');
+          const rids = (await env.DB.prepare('SELECT id FROM source_records WHERE tenant_id = ? AND entity_id = ?').bind(tid, eid).all()).results.map(r => r.id);
+          const st = [], t = now();
+          // quem dividia chave com o titular é recalculado (os blocos mudam); pares de revisão do perfil saem
+          for (const id of rids) st.push(env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at) SELECT tenant_id, record_id, NULL, ? FROM record_keys WHERE tenant_id = ? AND record_id <> ? AND k IN (SELECT k FROM record_keys WHERE tenant_id = ? AND record_id = ?) ON CONFLICT (tenant_id, record_id) DO NOTHING').bind(t, tid, id, tid, id), env.DB.prepare('DELETE FROM record_names WHERE tenant_id = ? AND record_id = ?').bind(tid, id));
+          st.push(env.DB.prepare('DELETE FROM identity_match_candidates WHERE tenant_id = ? AND (ent_a = ? OR ent_b = ?)').bind(tid, eid, eid));
+          st.push(env.DB.prepare('INSERT INTO tenant_stats (tenant_id, dirty, cands_dirty, at) VALUES (?, 1, 1, ?) ON CONFLICT (tenant_id) DO UPDATE SET dirty = 1, cands_dirty = 1').bind(tid, t));
+          for (const id of rids) { st.push(env.DB.prepare('DELETE FROM record_keys WHERE tenant_id = ? AND record_id = ?').bind(tid, id)); st.push(env.DB.prepare('DELETE FROM enrichment_results WHERE tenant_id = ? AND record_id = ?').bind(tid, id)); st.push(env.DB.prepare('DELETE FROM profile_queue WHERE tenant_id = ? AND record_id = ?').bind(tid, id)); }
+          st.push(env.DB.prepare('DELETE FROM source_records WHERE tenant_id = ? AND entity_id = ?').bind(tid, eid));
+          st.push(env.DB.prepare('DELETE FROM canonical_entities WHERE tenant_id = ? AND id = ?').bind(tid, eid));
+          st.push(env.DB.prepare('DELETE FROM golden_profile_versions WHERE tenant_id = ? AND entity_id = ?').bind(tid, eid));
+          st.push(env.DB.prepare('DELETE FROM lead_stages WHERE tenant_id = ? AND entity_id = ?').bind(tid, eid));
+          st.push(env.DB.prepare('INSERT OR REPLACE INTO entity_tombstones (tenant_id, id, at) VALUES (?,?,?)').bind(tid, eid, t));
+          st.push(env.DB.prepare('INSERT INTO erasure_requests (tenant_id, id, ref_hash, records, at, actor) VALUES (?,?,?,?,?,?)').bind(tid, 'er_' + rid(), String(b.ref_hash || eid), rids.length, t, user.email));
+          (b.suppress || []).forEach(s => st.push(env.DB.prepare('INSERT OR IGNORE INTO suppression_registry (tenant_id, key_hash, channel, at, reason) VALUES (?,?,?,?,?)').bind(tid, String(s.key_hash), String(s.channel), t, String(s.reason || 'eliminação de titular'))));
+          await runBatch(env, st);
+          await audit(env, tid, user.email, 'titular_eliminado', eid + ' · ' + rids.length + ' registro(s)', eid);
+          if (ctx) ctx.waitUntil(processQueue(env, tid, 20000).catch(e => console.error('fila: ' + e.message)));
+          return json({ ok: true, records: rids.length });
+        }
 
         if ((sub === 'raw' || sub === 'raw-mp') && req.method === 'POST') {
           // registro do arquivo ANTES de gravar registros: guarda o original, o SHA-256 e o comprovante de origem.
@@ -490,5 +606,17 @@ export default {
   async scheduled(event, env, ctx) {
     const due = (await env.DB.prepare("SELECT * FROM connectors WHERE status = 'ativo' AND type != 'webhook' AND (last_sync_at IS NULL OR last_sync_at + schedule_minutes * 60000 <= ?) ORDER BY last_sync_at LIMIT 8").bind(now()).all()).results;
     for (const c of due) ctx.waitUntil(runConnector(env, c.tenant_id, c, 'agendador').catch(() => {}));
+    // fila de perfis: cada tenant com pendências recebe uma rodada de processamento
+    const pend = (await env.DB.prepare("SELECT DISTINCT tenant_id FROM (SELECT tenant_id FROM profile_queue UNION SELECT tenant_id FROM tenant_stats WHERE cands_dirty = 1) LIMIT 5").all()).results;
+    for (const p of pend) ctx.waitUntil(processQueue(env, p.tenant_id, 50000, true).then(() => refreshStats(env, p.tenant_id)).catch(e => console.error('fila: ' + e.message)));
+    // recálculo diário (03h de Brasília): a atualidade dos dados depende da data, então todo perfil é refeito uma vez por dia
+    const day = Math.floor((now() - 3 * 3600000) / 86400000);
+    const stale = (await env.DB.prepare("SELECT t.id FROM tenants t LEFT JOIN tenant_stats s ON s.tenant_id = t.id WHERE t.profiles_mode = 'server' AND COALESCE(s.refreshed_at, 0) < ? LIMIT 3").bind(day).all()).results;
+    for (const x of stale) ctx.waitUntil((async () => {
+      await env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at, indexed) SELECT tenant_id, id, NULL, ?, 1 FROM source_records WHERE tenant_id = ? ON CONFLICT (tenant_id, record_id) DO NOTHING').bind(now(), x.id).run();
+      await env.DB.prepare('INSERT INTO tenant_stats (tenant_id, dirty, cands_dirty, refreshed_at) VALUES (?, 1, 1, ?) ON CONFLICT (tenant_id) DO UPDATE SET refreshed_at = excluded.refreshed_at, cands_dirty = 1').bind(x.id, day).run();
+    })().catch(e => console.error('recálculo diário: ' + e.message)));
+    const dirty = (await env.DB.prepare('SELECT tenant_id FROM tenant_stats WHERE dirty = 1 LIMIT 5').all()).results;
+    for (const d of dirty) ctx.waitUntil(refreshStats(env, d.tenant_id).catch(e => console.error('indicadores: ' + e.message)));
   }
 };

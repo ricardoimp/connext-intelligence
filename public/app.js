@@ -163,12 +163,20 @@ function constellation(ps, byId) {
 
 /* ---------- agregações ---------- */
 function srcStats(t) {
+  if (t.serverMode) { const st = {}; t.sources.forEach(s => st[s.id] = { records: 0, ass: 0, bad: 0, fields: {} }); const S2 = t.stats || {}; (S2.bySrc || []).forEach(x => { if (st[x.s]) st[x.s].records = x.n; }); (S2.fields || []).forEach(x => { const s = st[x.s]; if (!s || x.k === 'created_at') return; s.ass += x.n; s.bad += x.n - x.ok; if (x.ok) s.fields[x.k] = x.ok; }); return st; }
   const st = {}; t.sources.forEach(s => st[s.id] = { records: 0, ass: 0, bad: 0, fields: {} });
   const ok = S.f.days ? CX.now() - S.f.days * DAY : 0;
   t.records.forEach(r => { const s = st[r.source_id]; if (!s || r.observed_at < ok) return; s.records++; for (const k in r.f) { if (k === 'created_at') continue; let v = false; r.f[k].forEach(x => { s.ass++; if (x.valid) v = true; else s.bad++; }); if (v) s.fields[k] = (s.fields[k] || 0) + 1; } });
   return st;
 }
 function weekly(t) {
+  if (t.serverMode) {
+    const W2 = ((t.stats || {}).weekly || []).filter(x => !S.f.source || x.s === S.f.source); if (!W2.length) return { labels: [], series: [] };
+    let a = Infinity; W2.forEach(x => { if (x.w < a) a = x.w; }); const b = Math.floor(CX.now() / (7 * DAY)); if (a > b) a = b; const idx = {}; t.sources.forEach(s => idx[s.id] = new Array(b - a + 1).fill(0));
+    W2.forEach(x => { if (idx[x.s] && x.w >= a && x.w <= b) idx[x.s][x.w - a] += x.n; });
+    const long = b - a > 52, labels = []; for (let w = a; w <= b; w++) { const d = dt(w * 7 * DAY); labels.push(long ? d.slice(0, 5) + '/' + d.slice(8, 10) : d.slice(0, 5)); }
+    return { labels, series: t.sources.filter(s => idx[s.id].some(Boolean)).map(s => ({ name: s.name, color: srcColor(s.id), values: idx[s.id] })) };
+  }
   const recs = t.records.filter(r => !S.f.source || r.source_id === S.f.source); if (!recs.length) return { labels: [], series: [] };
   // mínimo em laço: Math.min(...lista) estoura a pilha acima de ~100 mil registros
   const wk = ms => Math.floor(ms / (7 * DAY)); let a = Infinity; for (const r of recs) { const w = wk(r.observed_at); if (w < a) a = w; } const b = wk(CX.now()), labels = [], idx = {}; if (!isFinite(a) || a > b) a = b; t.sources.forEach(s => idx[s.id] = new Array(b - a + 1).fill(0));
@@ -186,8 +194,9 @@ const avgOf = (ps, k) => ps.length ? Math.round(ps.reduce((s, p) => s + p.scores
 /* ---------- telas ---------- */
 const V = {};
 V.overview = () => {
-  const t = T(), ps = P(); if (!t.records.length) return empty('Este tenant ainda não tem dados. Envie um arquivo para ver o dashboard com indicadores reais.');
-  const now = CX.now(), recs = t.records.filter(r => !S.f.source || r.source_id === S.f.source), r30 = recs.filter(r => r.observed_at >= now - 30 * DAY).length, p30 = recs.filter(r => r.observed_at < now - 30 * DAY && r.observed_at >= now - 60 * DAY).length;
+  const t = T(), ps = P(); if (!nrec(t)) return empty('Este tenant ainda não tem dados. Envie um arquivo para ver o dashboard com indicadores reais.');
+  const now = CX.now(), recs = t.serverMode ? [] : t.records.filter(r => !S.f.source || r.source_id === S.f.source);
+  let r30, p30, nRecs; if (t.serverMode) { const wk = Math.floor(now / (7 * DAY)), W2 = ((t.stats || {}).weekly || []).filter(x => !S.f.source || x.s === S.f.source); r30 = W2.filter(x => x.w > wk - 5).reduce((a, x) => a + x.n, 0); p30 = W2.filter(x => x.w <= wk - 5 && x.w > wk - 9).reduce((a, x) => a + x.n, 0); nRecs = S.f.source ? ((t.stats || {}).bySrc || []).filter(x => x.s === S.f.source).reduce((a, x) => a + x.n, 0) : nrec(t); } else { r30 = recs.filter(r => r.observed_at >= now - 30 * DAY).length; p30 = recs.filter(r => r.observed_at < now - 30 * DAY && r.observed_at >= now - 60 * DAY).length; nRecs = recs.length; }
   const w = weekly(t), wtot = w.labels.map((_, i) => w.series.reduce((s, x) => s + x.values[i], 0)), dup = t.derived.duplicates, enr = ps.filter(p => p.enriched).length, dqi = avgOf(ps, 'dqi'), lv = [0, 0, 0, 0, 0, 0]; ps.forEach(p => lv[p.level]++);
   const delta = p30 ? Math.round((r30 - p30) / p30 * 100) : null, st = srcStats(t), snaps = t.snapshots;
   const kpi = (lab, v, s, sp) => `<section class="card kpi c2"><h3>${lab}</h3><div class="v">${v}</div><div class="s">${s}</div>${sp || ''}</section>`;
@@ -196,12 +205,12 @@ V.overview = () => {
   const fs = t.derived.fieldStats, bad = CX.FIELDS.filter(f => fs[f.k].invalid + fs[f.k].test + fs[f.k].stale > 0).map(f => ({ label: f.label, value: fs[f.k].invalid + fs[f.k].test, tip: f.label + '|Inválidos: ' + fs[f.k].invalid + '|Dados de teste: ' + fs[f.k].test + '|Envelhecidos: ' + fs[f.k].stale, color: 'var(--s8)' })).sort((a, b) => b.value - a.value).slice(0, 7);
   const enrByCat = {}; t.enrich.forEach(e => { const c = F[e.field].cat + (e.synthetic ? ' (sintético)' : ''); enrByCat[c] = (enrByCat[c] || 0) + 1; });
   return `<div class="grid">
-  ${kpi('Registros recebidos', fmt(recs.length), `30 dias: ${fmt(r30)} · 30 anteriores: ${fmt(p30)}${delta == null ? '' : ` <b class="${delta >= 0 ? 'up' : 'down'}">${delta >= 0 ? '▲' : '▼'} ${Math.abs(delta)}%</b>`}`, spark(wtot, 'var(--accent)'))}
+  ${kpi('Registros recebidos', fmt(nRecs), `30 dias: ${fmt(r30)} · 30 anteriores: ${fmt(p30)}${delta == null ? '' : ` <b class="${delta >= 0 ? 'up' : 'down'}">${delta >= 0 ? '▲' : '▼'} ${Math.abs(delta)}%</b>`}`, spark(wtot, 'var(--accent)'))}
   ${kpi('Entidades únicas', fmt(ps.length), `${fmt(ps.filter(p => p.type === 'person').length)} pessoas · ${fmt(ps.filter(p => p.type === 'organization').length)} organizações`)}
-  ${kpi('Duplicatas consolidadas', fmt(dup), `${pct(dup, t.records.length)}% dos registros · ${t.derived.candidates.length} em revisão`)}
+  ${kpi('Duplicatas consolidadas', fmt(dup), `${pct(dup, nrec(t))}% dos registros · ${t.derived.candidates.length} em revisão`)}
   ${kpi('Perfis enriquecidos', fmt(enr), `${pct(enr, ps.length)}% da base filtrada`)}
   ${kpi('Qualidade média (DQI)', dqi, `modelo v${t.config.version} · ${snaps.length} medições`, spark(snaps.map(s => s.dqi), 'var(--s3)'))}
-  ${kpi('Custo por registro', money(t.spend / Math.max(1, t.records.length)), `gasto com provedores: ${money(t.spend)}`)}
+  ${kpi('Custo por registro', money(t.spend / Math.max(1, nrec(t))), `gasto com provedores: ${money(t.spend)}`)}
   ${card('c8', 'Registros recebidos por semana', 'empilhado por fonte de aquisição, data de captura', areaStack(w.labels, w.series, 330))}
   ${card('c4', 'Indicadores médios', 'cinco indicadores independentes', `<div class="row" style="justify-content:center">${ring(dqi, 'DQI')}</div><div class="row" style="justify-content:center">${radar(SCORES.map(([k, l]) => ({ label: l, value: avgOf(ps, k) })), 'var(--accent)')}</div>`)}
   ${card('c12', 'Do dado bruto ao perfil publicado', 'volume em cada etapa do pipeline', flow(stages(t, ps)))}
@@ -247,12 +256,14 @@ V.import = () => {
 };
 /* ---------- histórico de importações: bruto x líquido ---------- */
 // bruto = linhas do arquivo (ou da origem); líquido = registros gravados; perfis novos = perfis que nasceram nesta importação
+const yieldKey = t => (t.serverMode ? t.derived.profiles.length + ':' + t.derived.at : t.records.length) + ':' + t.imports.length + ':' + t.imports.reduce((a, i) => a + (i.st ? i.st.normalized || 0 : 0), 0);
 function importYield(t) {
-  const d = t.derived; if (d && d._yield && d._yieldN === t.records.length) return d._yield;
+  const d = t.derived; if (d && d._yield && d._yieldN === yieldKey(t)) return d._yield;
   const order = {}; t.imports.forEach((i, k) => order[i.id] = k);
   const recImp = new Map(); for (const r of t.records) recImp.set(r.id, r.import_id);
   const novos = {}, unidos = {};
-  for (const p of (d ? d.profiles : [])) {
+  if (t.serverMode) for (const p of (d ? d.profiles : [])) { if (p.first_import) novos[p.first_import] = (novos[p.first_import] || 0) + 1; (p.imports || []).forEach(im => { if (im !== p.first_import) unidos[im] = (unidos[im] || 0) + 1; }); }
+  else for (const p of (d ? d.profiles : [])) {
     let first = null; for (const id of p.record_ids) { const im = recImp.get(id); if (im != null && (first == null || order[im] < order[first])) first = im; }
     if (first != null) novos[first] = (novos[first] || 0) + 1;
     const seen = new Set(); for (const id of p.record_ids) { const im = recImp.get(id); if (im != null && im !== first && !seen.has(im)) { seen.add(im); unidos[im] = (unidos[im] || 0) + 1; } }
@@ -262,7 +273,7 @@ function importYield(t) {
     const bruto = c ? c.linhas_no_arquivo : (i.st.received || i.total || 0), liquido = i.st.normalized || 0;
     out[i.id] = { bruto, liquido, pct: bruto ? liquido / bruto : 0, consolidadas: c ? bruto - c.pessoas - (c.sem_identificador || 0) : 0, descartadas: (i.rowErrors || []).filter(e => !e.warn).length, novos: novos[i.id] || 0, unidos: unidos[i.id] || 0, consol: c };
   });
-  if (d) { d._yield = out; d._yieldN = t.records.length; }
+  if (d) { d._yield = out; d._yieldN = yieldKey(t); }
   return out;
 }
 function importHistory(t) {
@@ -290,7 +301,7 @@ V.pipeline = () => {
   ${card('c6', 'Registros em revisão', '', `<div class="kv"><dt>Candidatos de identidade pendentes</dt><dd class="mono">${t.derived.candidates.length}</dd><dt>Perfis com conflito de atributo</dt><dd class="mono">${ps.filter(p => p.conflicts.length).length}</dd><dt>Conteúdo instrucional isolado</dt><dd class="mono">${ps.filter(p => p.flags.injection).length}</dd><dt>Última reconstrução</dt><dd class="mono">${t.derived.ms} ms</dd></div><p class="muted">Reprocessar reconstrói todos os perfis a partir dos registros brutos, das decisões e das evidências. O resultado é idêntico quando nada mudou.</p>`)}</div>`;
 };
 V.quality = () => {
-  const t = T(), ps = P(); if (!t.records.length) return empty('Sem dados para avaliar qualidade.');
+  const t = T(), ps = P(); if (!nrec(t)) return empty('Sem dados para avaliar qualidade.');
   const fs = t.derived.fieldStats, rows = CX.FIELDS.filter(f => fs[f.k].assertions).map(f => { const s = fs[f.k]; return `<tr><td><b>${f.label}</b><br><span class="muted">${f.cat}</span></td><td class="n">${fmt(s.assertions)}</td><td class="n">${fmt(s.valid)}</td><td class="n">${fmt(s.invalid)}</td><td class="n">${fmt(s.test)}</td><td class="n">${fmt(s.conflicts)}</td><td class="n">${fmt(s.stale)}</td><td style="min-width:120px"><div class="row"><span class="mono">${pct(s.valid, s.assertions)}%</span>${meter(pct(s.valid, s.assertions), 'var(--s3)')}</div></td></tr>`; });
   const issues = []; for (const p of ps) { for (const k in p.invalid) for (const a of p.invalid[k]) { if (issues.length < 60) issues.push(`<tr class="click" data-act="openLead" data-id="${p.id}"><td class="mono">${p.id}</td><td>${F[k].label}</td><td class="mono">${esc(String(k === 'cpf' ? mask(k, a.raw.replace(/\D/g, '').padStart(11, '0')) : a.raw).slice(0, 48))}</td><td>${chip(a.status === 'test' ? 'dado de teste' : 'inválido', a.status === 'test' ? 'warn' : 'crit')}</td><td class="muted">${esc(a.note)}</td><td>${esc(srcName(a.source_id))}</td></tr>`); } if (issues.length >= 60) break; }
   const rules = [['Normalização de nomes', 'caixa, espaços, partículas'], ['E-mail: sintaxe e domínio', 'domínio válido não comprova caixa postal ativa'], ['Telefone em E.164', 'DDD e formato de linha brasileiros'], ['CPF: dígitos verificadores', 'tratado como texto, zeros à esquerda preservados'], ['CNPJ: dígitos verificadores', 'compatível com formato alfanumérico'], ['CEP: 8 dígitos', ''], ['UF conhecida', ''], ['Datas plausíveis', 'rejeita datas futuras'], ['Registros técnicos e de teste', 'nomes, e-mails e dígitos repetidos'], ['Valores conflitantes entre fontes', ''], ['Envelhecimento de atributos', 'prazo por categoria'], ['Conteúdo instrucional em campos', 'tratado como dado, nunca como instrução']];
@@ -301,20 +312,22 @@ V.quality = () => {
   ${card('c12', 'Ocorrências', 'primeiras 60 afirmações rejeitadas nos filtros atuais', tbl(['Perfil', 'Atributo', 'Valor recebido', 'Classificação', 'Motivo', 'Fonte'], issues))}</div>`;
 };
 V.identity = () => {
-  const t = T(), d = t.derived, ps = P(); if (!t.records.length) return empty('Sem registros para resolver.');
-  const c = d.candidates[Math.min(S.cand, d.candidates.length - 1)], recById = id => t.records.find(r => r.id === id), dec = Object.entries(t.decisions.merge).map(([k, v]) => [k, v, 'fusão aprovada']).concat(Object.entries(t.decisions.reject).map(([k, v]) => [k, v, 'mantidos separados'])).concat(Object.entries(t.decisions.split).map(([k, v]) => [k, v, 'registro separado'])).sort((a, b) => b[1].at - a[1].at);
+  const t0 = T(), ps = P(); if (!nrec(t0)) return empty('Sem registros para resolver.');
+  let t = t0, d = t0.derived; const c = d.candidates[Math.min(S.cand, d.candidates.length - 1)];
+  if (t0.serverMode && c) { const m = detailOf(t0, 'c:' + c.key, async () => { const r = await CXSync.entity(t0.id, { records: [c.a, c.b] }); const ids = Array.from(new Set(r.rows.map(x => x.entity_id).filter(Boolean))); const e = await loadEntities(t0, ids); return { rows: r.rows.concat(e.rows), results: r.results.concat(e.results) }; }); if (m && !m.err) { t = m; d = Object.assign({}, t0.derived, { byId: m.derived.byId, recToEnt: m.derived.recToEnt }); } else return `<div class="grid">${loadingCard(m && m.err ? 'Não foi possível carregar o par: ' + esc(m.err) : 'Carregando os dois perfis do par em revisão...')}</div>`; }
+  const recById = id => t.records.find(r => r.id === id), dec = Object.entries(t.decisions.merge).map(([k, v]) => [k, v, 'fusão aprovada']).concat(Object.entries(t.decisions.reject).map(([k, v]) => [k, v, 'mantidos separados'])).concat(Object.entries(t.decisions.split).map(([k, v]) => [k, v, 'registro separado'])).sort((a, b) => b[1].at - a[1].at);
   let cmp = '<p class="muted">Nenhum candidato pendente. Fusões automáticas só ocorrem acima do limiar e sem documentos divergentes.</p>';
   if (c) { const A = d.byId[d.recToEnt[c.a]], B = d.byId[d.recToEnt[c.b]], ks = CX.FIELDS.filter(f => f.k !== 'created_at' && (A.fields[f.k] || B.fields[f.k]));
     cmp = `<div class="row" style="margin-bottom:8px"><b>Pontuação ${Math.round(c.score * 100)}%</b>${meter(c.score * 100, 'var(--warn)')}${c.reasons.map(r => chip(r, r.includes('vetada') ? 'crit' : 'info')).join('')}</div>${tbl(['Atributo', `Perfil A · ${A.id} · ${A.record_ids.length} registro(s)`, `Perfil B · ${B.id} · ${B.record_ids.length} registro(s)`, 'Comparação'], ks.map(f => { const a = A.fields[f.k], b = B.fields[f.k], eq = a && b && CX.norm(a.value) === CX.norm(b.value); return `<tr><td>${f.label}</td><td class="${a && b ? (eq ? 'eq' : 'df') : ''}">${a ? esc(mask(f.k, a.value)) + `<br><span class="muted">${esc(srcName(a.source_id))} · ${dt(a.observed_at)}</span>` : '<span class="muted">ausente</span>'}</td><td class="${a && b ? (eq ? 'eq' : 'df') : ''}">${b ? esc(mask(f.k, b.value)) + `<br><span class="muted">${esc(srcName(b.source_id))} · ${dt(b.observed_at)}</span>` : '<span class="muted">ausente</span>'}</td><td>${a && b ? (eq ? chip('coincide', 'good') : chip('diverge', 'serious')) : chip('sem comparação', 'plain')}</td></tr>`; }), 'cmp')}<div class="row" style="margin-top:10px"><button class="btn pri" data-act="decide" data-key="${c.key}" data-d="merge">Fundir perfis</button><button class="btn" data-act="decide" data-key="${c.key}" data-d="reject">Manter separados</button><button class="btn sm" data-act="openLead" data-id="${A.id}">Abrir A</button><button class="btn sm" data-act="openLead" data-id="${B.id}">Abrir B</button><span class="muted">Toda decisão é reversível e auditada.</span></div>`; }
   return `<div class="grid">
-  ${[['Registros', t.records.length], ['Entidades únicas', d.profiles.length], ['Fusões automáticas', d.autoMerges], ['Em revisão', d.candidates.length], ['Decisões humanas', dec.length], ['Blocos ignorados', d.oversized]].map(k => `<section class="card kpi c2"><h3>${k[0]}</h3><div class="v">${fmt(k[1])}</div></section>`).join('')}
+  ${[['Registros', nrec(t0)], ['Entidades únicas', d.profiles.length], ['Fusões automáticas', d.autoMerges], ['Em revisão', d.candidates.length], ['Decisões humanas', dec.length], ['Blocos ignorados', d.oversized]].map(k => `<section class="card kpi c2"><h3>${k[0]}</h3><div class="v">${fmt(k[1])}</div></section>`).join('')}
   ${card('c8', 'Revisão lado a lado', d.candidates.length ? `candidato ${Math.min(S.cand, d.candidates.length - 1) + 1} de ${d.candidates.length}` : '', cmp, d.candidates.length > 1 ? `<button class="btn sm" data-act="candNav" data-d="-1">Anterior</button><button class="btn sm" data-act="candNav" data-d="1">Próximo</button>` : '')}
   ${card('c4', 'Faixas de decisão', 'blocking por e-mail, telefone e documento, sem comparação quadrática', `<div class="stack"><label>Fusão automática a partir de <b class="mono">${Math.round(t.config.autoT * 100)}%</b><input type="range" min="60" max="99" value="${Math.round(t.config.autoT * 100)}" data-ch="autoT" id="rng-auto"></label><label>Revisão humana a partir de <b class="mono">${Math.round(t.config.reviewT * 100)}%</b><input type="range" min="30" max="80" value="${Math.round(t.config.reviewT * 100)}" data-ch="reviewT" id="rng-rev"></label><p class="muted">Abaixo da faixa de revisão os registros permanecem separados. Mesmo nome, endereço ou sobrenome nunca fundem sozinhos. Documentos válidos diferentes vetam a fusão. Chaves de identidade são derivadas com segredo do tenant, portanto não há vínculo entre tenants.</p></div>`)}
   ${card('c7', 'Organizações e pessoas vinculadas', 'relações comerciais resolvidas no master', constellation(ps, d.byId))}
   ${card('c5', 'Histórico de decisões', 'desfazer restaura o estado anterior', tbl(['Decisão', 'Registros', 'Quando', 'Quem', ''], dec.slice(0, 30).map(x => `<tr><td>${chip(x[2], x[2].includes('fusão') ? 'good' : 'info')}</td><td class="mono">${esc(x[0].replace('|', ' + '))}</td><td>${dtm(x[1].at)}</td><td>${esc(x[1].actor || '')}</td><td><button class="btn sm" data-act="${x[2] === 'registro separado' ? 'unsplit' : 'decide'}" data-key="${x[0]}" data-d="undo">Desfazer</button></td></tr>`)))}</div>`;
 };
 V.enrichment = () => {
-  const t = T(), ps = P(); if (!t.records.length) return empty('Sem perfis para enriquecer.');
+  const t = T(), ps = P(); if (!nrec(t)) return empty('Sem perfis para enriquecer.');
   const ids = ps.map(p => p.id), plan = CX.planEnrichment(t, ids, CX.PROVIDERS.map(p => p.id)), planI = CX.planEnrichment(t, ids, ['ddd_uf', 'master_link', 'domain_site']), planD = CX.planEnrichment(t, ids, ['demo_b2b']), b = t.config.budget.enrichMonthly;
   const cov = {}; t.enrich.forEach(e => { cov[e.provider] = (cov[e.provider] || 0) + 1; });
   return `<div class="grid">
@@ -327,7 +340,7 @@ V.enrichment = () => {
   ${card('c7', 'Execuções', '', tbl(['Execução', 'Quando', 'n:Pedidos', 'n:Aptos', 'n:Bloqueados', 'n:Atributos', 'n:Sintéticos', 'n:Custo', 'Estado'], t.enrichRuns.slice().reverse().map(r => `<tr><td class="mono">${r.id}</td><td>${dtm(r.at)}</td><td class="n">${fmt(r.requested)}</td><td class="n">${fmt(r.eligible)}</td><td class="n">${fmt(r.blockedPolicy)}</td><td class="n">${fmt(r.filled)}</td><td class="n">${fmt(r.synthetic)}</td><td class="n">${money(r.cost)}</td><td>${chip(r.state, r.state === 'concluído' ? 'good' : 'warn')}</td></tr>`)))}</div>`;
 };
 V.explorer = () => {
-  const t = T(); if (!t.records.length) return empty('Nenhum lead neste tenant.');
+  const t = T(); if (!nrec(t)) return empty('Nenhum lead neste tenant.');
   return `<div class="grid">${card('c12', 'Leads', `<span id="ex-count"></span>`, `<div class="row" style="margin-bottom:10px"><input type="text" id="ex-q" placeholder="Buscar por nome, e-mail, telefone, organização ou identificador" style="flex:1;min-width:220px" value="${esc(S.q)}" data-in="q"><label>Ordenar <select data-ch="sort"><option value="dqi" ${S.sort === 'dqi' ? 'selected' : ''}>DQI</option><option value="qualification" ${S.sort === 'qualification' ? 'selected' : ''}>Qualification</option><option value="level" ${S.sort === 'level' ? 'selected' : ''}>Nível</option><option value="updated" ${S.sort === 'updated' ? 'selected' : ''}>Atualização</option><option value="name" ${S.sort === 'name' ? 'selected' : ''}>Nome</option></select></label></div><div class="tw"><div class="vth"><span>Identificador</span><span>Nome ou organização</span><span>Tipo</span><span>Contato principal</span><span>Nível</span><span>DQI</span><span>Qualif.</span><span>Contato</span><span>Etapa</span><span>Atualizado</span></div><div class="vt" id="vt"></div></div>`)}</div>`;
 };
 function initExplorer() {
@@ -338,8 +351,35 @@ function initExplorer() {
   const draw = () => { const a = Math.max(0, Math.floor(el.scrollTop / RH) - 4), b = Math.min(rows.length, a + Math.ceil(el.clientHeight / RH) + 8); let h = ''; for (let i = a; i < b; i++) { const p = rows[i], c = p.fields.email || p.fields.phone; h += `<div class="r" style="top:${i * RH}px" data-act="openLead" data-id="${p.id}"><span class="mono muted">${p.id}</span><span><b>${esc(p.name)}</b></span><span>${p.type === 'person' ? 'Pessoa' : 'Organização'}</span><span class="mono">${c ? esc(c.value) : '<span class="muted">sem canal válido</span>'}</span><span>${lvl(p.level)}</span><span class="row" style="flex-wrap:nowrap"><span class="mono" style="width:22px">${p.scores.dqi}</span>${meter(p.scores.dqi)}</span><span class="mono">${p.scores.qualification}</span><span class="mono">${p.suppressed ? 'supr.' : p.scores.contactability}</span><span title="${p.stage ? esc(p.stage.reason) : ''}">${p.stage ? esc(STAGE_SHORT[p.stage.stage]) + (p.stage.needsAI ? ' ?' : '') : ''}</span><span class="mono">${dt(p.updated_at)}</span></div>`; } inner.innerHTML = h; };
   el.onscroll = draw; draw();
 }
+// ---------- perfis no servidor: detalhe sob demanda ----------
+// o navegador guarda só os cartões; para o Lead 360 e a revisão de identidade ele busca os registros
+// daquele perfil e recalcula localmente apenas esse pedaço, com o mesmo motor do servidor
+function miniOf(t0, rows, results) {
+  const m = Object.assign(Object.create(Object.getPrototypeOf(t0)), t0); m.serverMode = false; m.derived = null;
+  const seen = new Set(), recs = []; rows.forEach(x => { if (seen.has(x.id)) return; seen.add(x.id); recs.push(CXSync.recOf(x)); });
+  m.records = recs.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  m.enrich = results.map(e => ({ id: e.id, record_id: e.record_id, field: e.field, value: e.value, provider: e.provider, run: e.run_id, at: e.at, method: e.method, verification: e.verification, note: e.note, confidence: e.confidence, synthetic: !!e.synthetic, cost: e.cost }));
+  CX.rebuild(m); return m;
+}
+async function loadEntities(t0, ids) { const rows = [], results = []; for (const id of ids) { const r = await CXSync.entity(t0.id, { id }); rows.push(...r.rows); results.push(...r.results); } return { rows, results }; }
+function detailOf(t0, key, loader, alias) {
+  const D = S.det; if (D && D.key === key && D.tid === t0.id && D.ver === (t0.derived && t0.derived.at)) return D.err ? { err: D.err } : D.t;
+  if (D && D.key === key && D.loading) return null;
+  S.det = { key, tid: t0.id, loading: true, ver: t0.derived && t0.derived.at };
+  loader().then(({ rows, results }) => {
+    if (!S.det || S.det.key !== key) return; const m = miniOf(t0, rows, results);
+    (alias || []).forEach(([id, anc]) => { const pid = m.derived.recToEnt[anc]; if (pid && pid !== id) m.derived.byId[id] = m.derived.byId[pid]; });
+    S.det = { key, tid: t0.id, t: m, ver: t0.derived && t0.derived.at }; rerender();
+  }).catch(e => { S.det = { key, tid: t0.id, err: e.message, ver: t0.derived && t0.derived.at }; rerender(); });
+  return null;
+}
+const loadingCard = msg => `<div class="card c12 empty"><p>${msg}</p></div>`;
+function serverWork(t, body, msg) { return CXSync.reprocess(t.id, body).then(() => { S.det = null; t.queue = (t.queue || 0) + 1; toast(msg); renderTop(); setTimeout(pullLoop, 4000); }).catch(e => toast('Não foi possível reprocessar: ' + e.message, true)); }
+
 V.lead360 = () => {
-  const t = T(), d = t.derived, p = d && d.byId[S.lead]; if (!p) return empty('Selecione um lead no Lead Explorer para abrir o perfil completo.', '<a class="btn pri" href="#explorer">Abrir Lead Explorer</a>');
+  const t0 = T(); let t = t0;
+  if (t0.serverMode && S.lead && t0.derived.byId[S.lead]) { const m = detailOf(t0, 'e:' + S.lead, () => loadEntities(t0, [S.lead]), [[S.lead, t0.derived.byId[S.lead].anchor]]); if (!m) return loadingCard('Carregando o perfil completo e as evidências de cada atributo...'); if (m.err) return loadingCard('Não foi possível carregar o perfil: ' + esc(m.err)); t = m; }
+  const d = t.derived, p = d && d.byId[S.lead]; if (!p) return empty('Selecione um lead no Lead Explorer para abrir o perfil completo.', '<a class="btn pri" href="#explorer">Abrir Lead Explorer</a>');
   const org = p.org_id && d.byId[p.org_id], runs = t.enrichRuns.filter(r => r.changes[p.anchor] && r.changes[p.anchor].after), last = runs[runs.length - 1], ch = last && last.changes[p.anchor];
   const rows = CX.FIELDS.filter(f => f.k !== 'created_at' && (p.fields[f.k] || p.invalid[f.k] || CX.WEIGHTS[p.type][f.k])).map(f => { const x = p.fields[f.k], inv = p.invalid[f.k];
     const ev = x ? `<details><summary>${x.alts.length} evidência(s)</summary>${x.alts.map(a => `<div class="muted" style="margin-top:4px"><span class="mono" style="color:var(--text)">${esc(mask(f.k, a.value))}</span> · ${esc(srcName(a.source_id))} · ${dt(a.observed_at)} · ${esc(a.method)} · ${esc(a.verification)}${a.note ? ' · ' + esc(a.note) : ''} <span class="mono">${a.record_id}</span></div>`).join('')}</details>` : '';
@@ -377,7 +417,7 @@ V.ai = () => {
   ${card('c6', 'Última execução do orquestrador', last ? last.id + ' · ' + last.actor : '', last ? `<div class="steps">${last.steps.map((s, i) => String(i + 1).padStart(2, '0') + '  ' + esc(s)).join('\n')}</div>` : '<p class="muted">Nenhuma execução.</p>')}</div>`;
 };
 V.scoring = () => {
-  const t = T(), ps = P(), c = t.config; if (!t.records.length) return empty('Sem perfis para pontuar.');
+  const t = T(), ps = P(), c = t.config; if (!nrec(t)) return empty('Sem perfis para pontuar.');
   const bins = new Array(10).fill(0); ps.forEach(p => bins[Math.min(9, Math.floor(p.scores.dqi / 10))]++); const sum = Object.values(c.dqi).reduce((a, b) => a + b, 0);
   const wl = { completeness: 'Completude', validity: 'Validade', confidence: 'Confiança', freshness: 'Atualidade', traceability: 'Rastreabilidade' };
   return `<div class="grid">
@@ -389,7 +429,7 @@ V.scoring = () => {
   ${card('c12', 'Pontuação não substitui conformidade', '', '<p class="note info">Os indicadores de elegibilidade por finalidade são calculados à parte e bloqueiam segmentação, exportação e enriquecimento mesmo para perfis com pontuação comercial máxima. Confidence mede sustentação por evidência de fonte, não a confiança declarada por um modelo.</p>')}</div>`;
 };
 V.segments = () => {
-  const t = T(), sg = S.seg; if (!t.records.length) return empty('Sem perfis para segmentar.');
+  const t = T(), sg = S.seg; if (!nrec(t)) return empty('Sem perfis para segmentar.');
   const res = CX.evalSegment(t, sg), d = t.derived, contact = sg.purpose !== 'analytics' && sg.purpose !== 'enrichment';
   return `<div class="grid">
   ${card('c7', 'Construtor de regras', 'atributos sensíveis e documentos não estão disponíveis para segmentação', `<div class="stack"><div class="row"><label>Nome <input type="text" value="${esc(sg.name)}" data-in="segName" id="seg-name"></label><label>Finalidade <select data-ch="segPurpose">${Object.entries(CX.PURPOSES).map(([k, v]) => `<option value="${k}" ${sg.purpose === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label><label>Combinar com <select data-ch="segOp"><option ${sg.op === 'AND' ? 'selected' : ''}>AND</option><option ${sg.op === 'OR' ? 'selected' : ''}>OR</option></select></label></div>
@@ -444,7 +484,7 @@ V.monitoring = () => {
   ${k('Gasto com provedores', money(t.spend), `orçamento ${money(t.config.budget.enrichMonthly)} · ${fmt(q)} consultas`)}
   ${k('Custo por atributo validado', real ? money(t.spend / real) : 'n/d', `${fmt(real)} atributos sustentados por evidência`)}
   ${k('Taxa de enriquecimento útil', q ? pct(real, q) + '%' : 'n/d', `${fmt(t.cacheHits)} consultas duplicadas evitadas`)}
-  ${k('Volume bruto recebido', (bytes / 1024).toLocaleString('pt-BR', { maximumFractionDigits: 0 }) + ' KB', `${fmt(t.records.length)} registros em memória`)}
+  ${k('Volume bruto recebido', (bytes / 1024).toLocaleString('pt-BR', { maximumFractionDigits: 0 }) + ' KB', `${fmt(nrec(t))} registros em memória`)}
   ${k('Custo por perfil qualificado', ps.filter(p => p.scores.qualification >= 60).length ? money(t.spend / ps.filter(p => p.scores.qualification >= 60).length) : 'n/d', `${fmt(ps.filter(p => p.scores.qualification >= 60).length)} perfis com Qualification a partir de 60`)}
   ${k('Última reconstrução', t.derived ? t.derived.ms + ' ms' : 'n/d', 'resolução, golden record e pontuação')}
   ${card('c6', 'Custo por provedor', '', tbl(['Provedor', 'n:Consultas', 'n:Atributos', 'n:Custo', 'n:Aproveitamento'], Object.entries(byP).map(([p, b]) => `<tr><td>${esc(srcName(p))}</td><td class="n">${fmt(b.queries)}</td><td class="n">${fmt(b.fields)}</td><td class="n">${money(b.cost)}</td><td class="n">${pct(b.fields, b.queries)}%</td></tr>`)))}
@@ -587,16 +627,16 @@ const ACT = {
   reprocess() { const t = T(), s1 = CX.signature(t); CX.rebuild(t); const same = CX.signature(t) === s1; t.executions.push({ id: 'wf_' + (t.idp || '') + (t.executions.length + 1), kind: 'Reprocessamento', trigger: 'Solicitação de atualização', ref: 'todos', at: CX.now(), state: 'concluído', attempts: 1, ms: t.derived.ms, cost: 0, detail: same ? 'resultado idêntico (idempotente)' : 'perfis atualizados' }); CX.audit(t, actor(), 'reprocessamento', t.derived.ms + ' ms'); toast(`Reprocessado em ${t.derived.ms} ms. ${same ? 'Resultado idêntico ao anterior.' : 'Perfis atualizados.'}`); rerender(); },
   openLead(el) { S.lead = el.dataset.id; S.eraseArm = null; if (location.hash !== '#lead360') location.hash = 'lead360'; else render(); },
   candNav(el) { const n = T().derived.candidates.length; S.cand = (S.cand + +el.dataset.d + n) % n; rerender(); },
-  decide(el) { if (!guard('merge')) return; CX.decide(T(), el.dataset.key, el.dataset.d, actor()); S.cand = 0; toast(el.dataset.d === 'merge' ? 'Perfis fundidos. A decisão pode ser desfeita no histórico.' : el.dataset.d === 'reject' ? 'Perfis mantidos separados.' : 'Decisão desfeita.'); rerender(); },
+  decide(el) { if (!guard('merge')) return; const t = T(); CX.decide(t, el.dataset.key, el.dataset.d, actor()); if (t.serverMode && el.dataset.d !== 'undo') { t.derived.candidates = t.derived.candidates.filter(c => c.key !== el.dataset.key); S.det = null; } S.cand = 0; toast(el.dataset.d === 'merge' ? 'Perfis fundidos. A decisão pode ser desfeita no histórico.' : el.dataset.d === 'reject' ? 'Perfis mantidos separados.' : 'Decisão desfeita.'); rerender(); },
   unsplit(el) { if (!guard('merge')) return; CX.splitRecord(T(), el.dataset.key, false, actor()); rerender(); },
-  split(el) { if (!guard('merge')) return; const t = T(); CX.splitRecord(t, el.dataset.id, true, actor()); S.lead = t.derived.recToEnt[t.derived.byId[S.lead] ? t.derived.byId[S.lead].anchor : el.dataset.id] || S.lead; toast('Registro separado do perfil. Desfaça em Identity Resolution.'); rerender(); },
-  enrich(el) { if (!guard('enrich')) return; const t = T(), run = CX.runEnrichment(t, P().map(p => p.id), el.dataset.p === 'int' ? ['ddd_uf', 'master_link', 'domain_site'] : ['demo_b2b'], { actor: actor() }); toast(run.state === 'concluído' ? `${run.id}: ${run.filled} atributos sustentados, ${run.synthetic} sintéticos, custo ${money(run.cost)}.` : run.reason + ' Aprovação pendente em Workflows.', run.state !== 'concluído'); rerender(); },
-  enrichOne() { if (!guard('enrich')) return; const t = T(), anchor = t.derived.byId[S.lead].anchor, run = CX.runEnrichment(t, [S.lead], ['ddd_uf', 'master_link', 'domain_site'], { actor: actor() }); S.lead = t.derived.recToEnt[anchor]; toast(run.blockedPolicy ? 'Enriquecimento bloqueado: nenhuma fonte deste perfil permite a finalidade.' : run.filled ? `${run.filled} atributo(s) obtidos por derivação interna.` : 'Nenhuma lacuna tratável pelos provedores internos.', !!run.blockedPolicy); rerender(); },
+  split(el) { if (!guard('merge')) return; const t = T(); CX.splitRecord(t, el.dataset.id, true, actor()); if (t.serverMode) { S.det = null; scheduleSync(); toast('Registro enviado para separação. O servidor recalcula o perfil em instantes.'); return rerender(); } S.lead = t.derived.recToEnt[t.derived.byId[S.lead] ? t.derived.byId[S.lead].anchor : el.dataset.id] || S.lead; toast('Registro separado do perfil. Desfaça em Identity Resolution.'); rerender(); },
+  enrich(el) { if (!guard('enrich')) return; const t = T(); if (t.serverMode) { if (el.dataset.p !== 'int') return toast('No modo servidor o provedor externo roda pelo agendamento aprovado em Workflows.', true); const ids = P().map(p => p.id); return serverWork(t, ids.length >= t.derived.profiles.length ? { all: true, op: 'enrich:ddd_uf,master_link,domain_site' } : { entity_ids: ids.slice(0, 5000), op: 'enrich:ddd_uf,master_link,domain_site' }, 'Enriquecimento interno enviado ao servidor para ' + fmt(ids.length) + ' perfil(is). Os resultados aparecem conforme o processamento avança.'); } const run = CX.runEnrichment(t, P().map(p => p.id), el.dataset.p === 'int' ? ['ddd_uf', 'master_link', 'domain_site'] : ['demo_b2b'], { actor: actor() }); toast(run.state === 'concluído' ? `${run.id}: ${run.filled} atributos sustentados, ${run.synthetic} sintéticos, custo ${money(run.cost)}.` : run.reason + ' Aprovação pendente em Workflows.', run.state !== 'concluído'); rerender(); },
+  enrichOne() { if (!guard('enrich')) return; if (T().serverMode) return serverWork(T(), { entity_ids: [S.lead], op: 'enrich:ddd_uf,master_link,domain_site' }, 'Enriquecimento interno enviado ao servidor. O perfil é atualizado em instantes.'); const t = T(), anchor = t.derived.byId[S.lead].anchor, run = CX.runEnrichment(t, [S.lead], ['ddd_uf', 'master_link', 'domain_site'], { actor: actor() }); S.lead = t.derived.recToEnt[anchor]; toast(run.blockedPolicy ? 'Enriquecimento bloqueado: nenhuma fonte deste perfil permite a finalidade.' : run.filled ? `${run.filled} atributo(s) obtidos por derivação interna.` : 'Nenhuma lacuna tratável pelos provedores internos.', !!run.blockedPolicy); rerender(); },
   approveRun(el) { if (!guard('approve')) return; const t = T(), r = t.enrichRuns.find(x => x.id === el.dataset.id); r.state = 'aprovado'; const run = CX.runEnrichment(t, P().map(p => p.id), r.providers, { actor: actor(), approveOverBudget: true, trigger: 'Aprovação humana' }); toast(`Aprovado. ${run.id} executado, custo ${money(run.cost)}.`); rerender(); },
   denyRun(el) { if (!guard('approve')) return; const r = T().enrichRuns.find(x => x.id === el.dataset.id); r.state = 'negado'; CX.audit(T(), actor(), 'consulta_negada', r.id); rerender(); },
-  suppressLead() { if (!guard('govern')) return; const t = T(), p = t.derived.byId[S.lead]; let n = 0; ['email', 'phone'].forEach(k => { if (p.fields[k] && CX.suppress(t, k, p.fields[k].value, actor())) n++; }); toast(n ? 'Oposição registrada: canais deste titular bloqueados para contato.' : 'Este perfil não tem canal válido para suprimir.', !n); rerender(); },
-  eraseLead() { if (!guard('govern')) return; if (S.eraseArm !== S.lead) { S.eraseArm = S.lead; rerender(); return; } const n = CX.eraseEntity(T(), S.lead, actor()); S.lead = null; S.eraseArm = null; toast(`Eliminação concluída: ${n} registro(s) de origem e evidências removidos.`); location.hash = 'explorer'; },
-  publishModel() { if (!guard('config')) return; const t = T(); CX.publishModel(t, { dqi: Object.assign({}, t.config.dqi) }, actor()); toast('Modelo v' + t.config.version + ' publicado e indicadores recalculados.'); rerender(); },
+  suppressLead() { if (!guard('govern')) return; const t = T(), p = t.derived.byId[S.lead]; let n = 0; ['email', 'phone'].forEach(k => { if (p.fields[k] && CX.suppress(t, k, p.fields[k].value, actor())) n++; }); toast(n ? 'Oposição registrada: canais deste titular bloqueados para contato.' : 'Este perfil não tem canal válido para suprimir.', !n); if (n && t.serverMode) { scheduleSync(); setTimeout(() => CXSync.reprocess(t.id, { entity_ids: [S.lead] }).catch(() => {}), 3000); } rerender(); },
+  eraseLead() { if (!guard('govern')) return; if (S.eraseArm !== S.lead) { S.eraseArm = S.lead; rerender(); return; } if (T().serverMode) { const t = T(), id = S.lead; S.eraseArm = null; return CXSync.erase(t.id, { entity_id: id, ref_hash: CX.hash(id) }).then(r => { const der = t.derived; der.profiles = der.profiles.filter(p => p.id !== id); delete der.byId[id]; CX.cardsDerived(t, der.profiles, der.byId, der.candidates, Math.max(0, (t.recordCount || 0) - r.records)); t.recordCount = Math.max(0, (t.recordCount || 0) - r.records); S.lead = null; S.det = null; toast(`Eliminação concluída: ${r.records} registro(s) de origem e evidências removidos.`); location.hash = 'explorer'; }).catch(e => toast('Não foi possível eliminar: ' + e.message, true)); } const n = CX.eraseEntity(T(), S.lead, actor()); S.lead = null; S.eraseArm = null; toast(`Eliminação concluída: ${n} registro(s) de origem e evidências removidos.`); location.hash = 'explorer'; },
+  publishModel() { if (!guard('config')) return; const t = T(); CX.publishModel(t, { dqi: Object.assign({}, t.config.dqi) }, actor()); if (t.serverMode) { scheduleSync(); setTimeout(() => serverWork(t, { all: true }, 'Modelo v' + t.config.version + ' publicado. O servidor está recalculando os indicadores de todos os perfis.'), 2500); return rerender(); } toast('Modelo v' + t.config.version + ' publicado e indicadores recalculados.'); rerender(); },
   addRule() { S.seg.rules.push({ field: 'dqi', cmp: '>=', value: '70' }); rerender(); },
   delRule(el) { S.seg.rules.splice(+el.dataset.i, 1); rerender(); },
   saveSeg() { if (!guard('segment')) return; const t = T(); t.segments.push(JSON.parse(JSON.stringify(S.seg))); CX.audit(t, actor(), 'segmento_salvo', S.seg.name); rerender(); },
@@ -652,7 +692,7 @@ const CH = {
 };
 const FORMS = {
   addSource() { if (!guard('config')) return; const g = id => $('#' + id).value.trim(); CX.addSource(T(), { name: g('src-name'), origin: g('src-origin'), owner: g('src-owner'), legal_basis: g('src-legal'), contract: g('src-contract'), reliability: Math.max(0, Math.min(1, +g('src-rel') || 0.5)), purposes: Object.keys(CX.PURPOSES).filter(k => $('#src-p-' + k).checked), type: 'Arquivo' }, actor()); S.newSrc = false; toast('Fonte cadastrada.'); },
-  correct() { if (!guard('govern')) return; const t = T(), anchor = t.derived.byId[S.lead].anchor, r = CX.correctField(t, S.lead, $('#fix-field').value, $('#fix-value').value, actor()); if (r && r.valid) { S.lead = t.derived.recToEnt[anchor]; toast('Correção registrada como evidência manual e aplicada ao perfil.'); } else toast('Valor rejeitado pela validação: ' + ((r && r.note) || 'formato inválido'), true); },
+  correct() { if (!guard('govern')) return; const t = T(), anchor = t.derived.byId[S.lead].anchor, r = CX.correctField(t, S.lead, $('#fix-field').value, $('#fix-value').value, actor()); if (r && r.valid) { if (t.serverMode) { S.det = null; scheduleSync(); } else S.lead = t.derived.recToEnt[anchor]; toast('Correção registrada como evidência manual e aplicada ao perfil.'); } else toast('Valor rejeitado pela validação: ' + ((r && r.note) || 'formato inválido'), true); },
   suppress() { if (!guard('govern')) return; toast(CX.suppress(T(), $('#sup-type').value, $('#sup-value').value, actor()) ? 'Supressão registrada.' : 'Canal inválido: confira o formato.', false); },
   ask() { ask($('#ai-q').value); },
   icp() { if (!guard('config')) return; const sp = id => $('#' + id).value.split(',').map(s => s.trim()).filter(Boolean), t = T(); CX.publishModel(t, { icp: { segments: sp('icp-seg'), states: sp('icp-uf').map(s => s.toUpperCase()), titles: sp('icp-tit'), corpEmail: $('#icp-corp').checked } }, actor()); toast('Perfil ideal salvo. Modelo v' + t.config.version + ' publicado.'); },
@@ -696,6 +736,7 @@ document.addEventListener('change', e => { const el = e.target; if (el.id === 'f
 document.addEventListener('input', e => { const el = e.target, k = el.dataset.in; if (k === 'q') { S.q = el.value; initExplorer(); } else if (k === 'segName') S.seg.name = el.value; else if (el.dataset.ch === 'w') el.nextElementSibling.textContent = el.value; });
 document.addEventListener('submit', e => { const f = e.target.dataset.form; if (!f) return; e.preventDefault(); if (FORMS[f]() !== false && f !== 'ask') rerender(); });
 window.addEventListener('hashchange', route);
+if (location.hostname === 'localhost') window.__cx = { store, S, T, weekly, importYield, P };  // só no ambiente local de testes
 ['dragover', 'dragleave', 'drop'].forEach(ev => document.addEventListener(ev, e => { const d = e.target.closest && e.target.closest('#drop'); if (ev !== 'dragleave') e.preventDefault(); if (d) d.classList.toggle('over', ev === 'dragover'); if (ev === 'drop' && e.dataTransfer && e.dataTransfer.files.length && guard('import')) { S.queue = Array.from(e.dataTransfer.files); nextInQueue(); } }));
 const tip = $('#tip');
 document.addEventListener('mousemove', e => { const el = e.target.closest && e.target.closest('[data-tip]'); if (!el) { tip.style.display = 'none'; return; } const parts = el.dataset.tip.split('|'); tip.textContent = ''; parts.forEach((p, i) => { const n = document.createElement(i ? 'span' : 'b'); n.textContent = p; tip.appendChild(n); }); tip.style.display = 'block'; const w = tip.offsetWidth, h = tip.offsetHeight; tip.style.left = Math.min(innerWidth - w - 8, e.clientX + 14) + 'px'; tip.style.top = (e.clientY + h + 24 > innerHeight ? e.clientY - h - 10 : e.clientY + 16) + 'px'; });
@@ -769,6 +810,8 @@ function columnsSummary(headers, rows, sug) {
   return headers.map((h, i) => { const vals = rows.slice(0, 500).map(r => r[i]).filter(v => v !== '' && v != null); const uniq = Array.from(new Set(vals.map(String))); const c = sug.cols[i] || {}; return { index: i, header: h, samples: uniq.slice(0, 5).map(maskSample), fill: rows.length ? Math.round(vals.length / Math.min(500, rows.length) * 100) : 0, distinct: uniq.length, guess: c.field || null, guess_conf: c.confidence || 0 }; });
 }
 const nRows = p => p.big ? p.big.total : p.rows.length;
+// registros na base: no modo servidor a contagem vem do banco (o navegador não guarda os registros)
+const nrec = t => t.serverMode ? (t.recordCount || 0) + t.records.length : t.records.length;
 const isGeneric = h => /^coluna_\d+$/.test(String(h || '').trim());
 // nome exibido da coluna: digitado pela pessoa > (cabeçalho genérico: sugerido pela IA > campo reconhecido) > cabeçalho original
 function dispName(t, c, names, mapping) {
@@ -933,7 +976,7 @@ async function pullLoop() {
   const t = store.tenants[S.tenant];
   if (S.hosted && t && t.remote && !pullBusy && !S.run && !S.syncing && !syncTimer && document.visibilityState === 'visible') {
     pullBusy = true;
-    try { const r = await CXSync.pullChanges(t); if (r.added || r.imports) { S.live = { at: Date.now(), added: r.added }; if (!S.imp) rerender(); else renderTop(); if (r.added) toast(fmt(r.added) + ' registro(s) novo(s) chegaram pelas conexões.'); scheduleSync(); } if (r.more) setTimeout(pullLoop, 500); }
+    try { const r = await CXSync.pullChanges(t); if (t.serverMode) { if (r.profiles || r.imports) { S.live = { at: Date.now(), added: r.added }; if (!S.imp) rerender(); else renderTop(); } if (t.queue) setTimeout(pullLoop, 5000); } else if (r.added || r.imports) { S.live = { at: Date.now(), added: r.added }; if (!S.imp) rerender(); else renderTop(); if (r.added) toast(fmt(r.added) + ' registro(s) novo(s) chegaram pelas conexões.'); scheduleSync(); } if (r.more) setTimeout(pullLoop, 500); }
     catch (e) { /* tenta de novo no próximo ciclo */ }
     pullBusy = false;
   }

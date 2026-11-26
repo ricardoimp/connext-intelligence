@@ -37,5 +37,6 @@
     "INGEST_HOST": "ingest.connextintelligence.com"
   },
   "triggers": { "crons": ["* * * * *"] },
+  "limits": { "cpu_ms": 300000 },
   "observability": { "enabled": true }
 }
