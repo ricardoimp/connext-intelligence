@@ -281,7 +281,7 @@ CX.access = function (store, actor, tenantId) {
 };
 CX.audit = (t, actor, action, detail, ref) => { t.audit.push({ at: CX.now(), actor, action, detail: detail || '', ref: ref || null }); };
 CX.addSource = function (t, s, actor) {
-  const src = Object.assign({ id: 'src_' + (t.sources.length + 1), type: 'Arquivo', reliability: 0.7, purposes: [], legal_basis: '', origin: '', owner: '', contract: '', created_at: CX.now() }, s);
+  const src = Object.assign({ id: 'src_' + (t.idp || '') + (t.sources.length + 1), type: 'Arquivo', reliability: 0.7, purposes: [], legal_basis: '', origin: '', owner: '', contract: '', created_at: CX.now() }, s);
   t.sources.push(src); CX.audit(t, actor || 'sistema', 'fonte_criada', src.id); return src;
 };
 CX.sourcePolicy = function (src) {
@@ -299,7 +299,7 @@ CX.beginImport = function (t, m) {
   const prev = t.imports.find(i => i.fileHash === m.fileHash && i.sourceId === m.sourceId && i.status === 'concluído');
   if (prev) { CX.audit(t, m.actor || 'sistema', 'importacao_idempotente', prev.id); return { skipped: true, job: prev, reason: 'Arquivo idêntico já importado nesta fonte (' + prev.id + '). Nenhum registro duplicado foi criado.' }; }
   const version = t.imports.filter(i => i.fileName === m.fileName && i.sourceId === m.sourceId).length + 1;
-  const job = { id: 'imp_' + (t.imports.length + 1), sourceId: m.sourceId, fileName: m.fileName, fileHash: m.fileHash, format: m.format, encoding: m.encoding, bytes: m.bytes || 0, version, at: m.at || CX.now(), actor: m.actor || 'sistema', status: 'processando', mapping: m.mapping, total: m.total || 0, cursor: 0, parseErrors: m.parseErrors || [], rowErrors: [], st: { received: (m.total || 0) + (m.parseErrors || []).filter(e => !e.warn).length, extracted: m.total || 0, mapped: 0, normalized: 0, validated: 0 }, ms: { extract: m.msExtract || 0, normalize: 0, resolve: 0 }, recIds: [] };
+  const job = { id: 'imp_' + (t.idp || '') + (t.imports.length + 1), sourceId: m.sourceId, fileName: m.fileName, fileHash: m.fileHash, format: m.format, encoding: m.encoding, bytes: m.bytes || 0, version, at: m.at || CX.now(), actor: m.actor || 'sistema', status: 'processando', mapping: m.mapping, total: m.total || 0, cursor: 0, parseErrors: m.parseErrors || [], rowErrors: [], st: { received: (m.total || 0) + (m.parseErrors || []).filter(e => !e.warn).length, extracted: m.total || 0, mapped: 0, normalized: 0, validated: 0 }, ms: { extract: m.msExtract || 0, normalize: 0, resolve: 0 }, recIds: [] };
   t.imports.push(job);
   if (m.sig) t.mappings[m.sig] = { map: m.headerMap || {}, at: CX.now(), used: (t.mappings[m.sig] ? t.mappings[m.sig].used : 0) + 1, fileName: m.fileName };
   return { job };
@@ -307,7 +307,7 @@ CX.beginImport = function (t, m) {
 CX.processChunk = function (t, job, rows, start, end) {
   const t0 = Date.now(), map = job.mapping;
   for (let i = start; i < end; i++) {
-    const arr = rows[i], rec = { id: 'rec_' + (++t.seq).toString(36), source_id: job.sourceId, import_id: job.id, row: i + 1, f: {}, observed_at: job.at, flags: null };
+    const arr = rows[i], rec = { id: 'rec_' + (t.idp || '') + (++t.seq).toString(36), source_id: job.sourceId, import_id: job.id, row: i + 1, f: {}, observed_at: job.at, flags: null };
     let any = false, anyValid = false;
     for (const c in map) {
       const field = map[c], v = arr[c]; if (!field || v === '' || v == null) continue;
@@ -329,7 +329,7 @@ CX.cancelImport = function (t, job, actor) {
 CX.finishImport = function (t, job) {
   job.status = 'concluído'; const t0 = Date.now(); CX.rebuild(t); job.ms.resolve = Date.now() - t0;
   const d = t.derived; t.snapshots.push({ at: job.at, import_id: job.id, records: t.records.length, entities: d.profiles.length, dqi: d.avg.dqi, completeness: d.avg.completeness, confidence: d.avg.confidence });
-  t.executions.push({ id: 'wf_' + (t.executions.length + 1), kind: 'Pipeline de importação', trigger: 'Novo arquivo', ref: job.id, at: job.at, state: 'concluído', attempts: 1, ms: job.ms.extract + job.ms.normalize + job.ms.resolve, cost: 0, detail: job.st.normalized + ' registros, ' + job.rowErrors.length + ' erros de linha' });
+  t.executions.push({ id: 'wf_' + (t.idp || '') + (t.executions.length + 1), kind: 'Pipeline de importação', trigger: 'Novo arquivo', ref: job.id, at: job.at, state: 'concluído', attempts: 1, ms: job.ms.extract + job.ms.normalize + job.ms.resolve, cost: 0, detail: job.st.normalized + ' registros, ' + job.rowErrors.length + ' erros de linha' });
   CX.audit(t, job.actor, 'importacao_concluida', job.id + ' · ' + job.st.normalized + ' registros');
   return job;
 };
@@ -502,7 +502,7 @@ CX.planEnrichment = function (t, ids, provIds) {
 };
 CX.runEnrichment = function (t, ids, provIds, o) {
   o = o || {}; const actor = o.actor || 'agente:orquestrador', t0 = Date.now(), plan = CX.planEnrichment(t, ids, provIds);
-  const run = { id: 'enr_' + (t.enrichRuns.length + 1), at: CX.now(), actor, providers: provIds, requested: ids.length, eligible: plan.eligible, blockedPolicy: plan.blockedPolicy, noGap: plan.noGap, cacheHits: plan.cacheHits, cost: 0, filled: 0, synthetic: 0, byProvider: {}, unavailable: plan.unavailable, changes: {}, state: 'concluído', steps: [] };
+  const run = { id: 'enr_' + (t.idp || '') + (t.enrichRuns.length + 1), at: CX.now(), actor, providers: provIds, requested: ids.length, eligible: plan.eligible, blockedPolicy: plan.blockedPolicy, noGap: plan.noGap, cacheHits: plan.cacheHits, cost: 0, filled: 0, synthetic: 0, byProvider: {}, unavailable: plan.unavailable, changes: {}, state: 'concluído', steps: [] };
   t.cacheHits += plan.cacheHits;
   run.steps.push('inspect_lead · ' + ids.length + ' perfis', 'check_processing_policy · ' + plan.blockedPolicy + ' bloqueados por finalidade', 'list_eligible_providers · ' + provIds.join(', '), 'estimate_enrichment_cost · R$ ' + plan.cost.toFixed(2) + ' de R$ ' + plan.remaining.toFixed(2) + ' disponíveis');
   plan.unavailable.forEach(u => run.steps.push('query_authorized_provider · ' + u + ' indisponível, circuito aberto, perfis mantidos sem alteração'));
@@ -520,7 +520,7 @@ CX.runEnrichment = function (t, ids, provIds, o) {
   for (const a in run.changes) { const p = t.derived.byId[t.derived.recToEnt[a]]; if (p) run.changes[a].after = { level: p.level, scores: Object.assign({}, p.scores), fields: Object.fromEntries(Object.keys(p.fields).map(k => [k, p.fields[k].value])) }; }
   run.ms = Date.now() - t0; run.steps.push('propose_profile_update · ' + run.filled + ' atributos sustentados, ' + run.synthetic + ' sintéticos fora dos indicadores', 'recalculate_scores · ' + Object.keys(run.changes).length + ' perfis', 'summarize_enrichment_run · custo R$ ' + run.cost.toFixed(2));
   t.enrichRuns.push(run);
-  t.executions.push({ id: 'wf_' + (t.executions.length + 1), kind: 'Enriquecimento', trigger: o.trigger || 'Solicitação de atualização', ref: run.id, at: run.at, state: run.state, attempts: 1, ms: run.ms, cost: run.cost, detail: run.filled + ' atributos, ' + run.blockedPolicy + ' bloqueados por política' });
+  t.executions.push({ id: 'wf_' + (t.idp || '') + (t.executions.length + 1), kind: 'Enriquecimento', trigger: o.trigger || 'Solicitação de atualização', ref: run.id, at: run.at, state: run.state, attempts: 1, ms: run.ms, cost: run.cost, detail: run.filled + ' atributos, ' + run.blockedPolicy + ' bloqueados por política' });
   CX.audit(t, actor, 'enriquecimento_executado', run.id + ' · custo R$ ' + run.cost.toFixed(2));
   return run;
 };
@@ -535,11 +535,11 @@ CX.eraseEntity = function (t, entId, actor) {
 CX.correctField = function (t, entId, field, value, actor) {
   const p = t.derived.byId[entId]; if (!p) return false; const n = CX.normalize(field, value); if (!n.valid) return n;
   let src = t.sources.find(s => s.id === 'src_manual'); if (!src) { src = { id: 'src_manual', name: 'Correção manual', type: 'Manual', reliability: 1, purposes: ['analytics', 'enrichment', 'marketing_contact', 'sales_contact'], legal_basis: 'obrigacao_legal', origin: 'Solicitação de correção', owner: 'DPO', contract: 'Direito de correção (LGPD art. 18, III)', created_at: CX.now() }; t.sources.push(src); }
-  n.raw = String(value); const rec = { id: 'rec_' + (++t.seq).toString(36), source_id: 'src_manual', import_id: null, row: 0, f: { [field]: [n] }, observed_at: CX.now(), type: p.type, flags: null };
+  n.raw = String(value); const rec = { id: 'rec_' + (t.idp || '') + (++t.seq).toString(36), source_id: 'src_manual', import_id: null, row: 0, f: { [field]: [n] }, observed_at: CX.now(), type: p.type, flags: null };
   t.records.push(rec); t.decisions.merge[p.anchor < rec.id ? p.anchor + '|' + rec.id : rec.id + '|' + p.anchor] = { at: CX.now(), actor, manual: true };
   CX.audit(t, actor, 'correcao_campo', field, entId); CX.rebuild(t); return n;
 };
-CX.publishModel = function (t, patch, actor) { t.modelVersions.push({ version: t.config.version, at: CX.now(), dqi: Object.assign({}, t.config.dqi), icp: JSON.parse(JSON.stringify(t.config.icp)), avg: t.derived ? t.derived.avg.dqi : 0 }); Object.assign(t.config, patch); t.config.version++; CX.audit(t, actor, 'modelo_scoring_publicado', 'v' + t.config.version); CX.rebuild(t); t.executions.push({ id: 'wf_' + (t.executions.length + 1), kind: 'Recalcular indicadores', trigger: 'Novo modelo de pontuação publicado', ref: 'v' + t.config.version, at: CX.now(), state: 'concluído', attempts: 1, ms: t.derived.ms, cost: 0, detail: t.derived.profiles.length + ' perfis' }); };
+CX.publishModel = function (t, patch, actor) { t.modelVersions.push({ version: t.config.version, at: CX.now(), dqi: Object.assign({}, t.config.dqi), icp: JSON.parse(JSON.stringify(t.config.icp)), avg: t.derived ? t.derived.avg.dqi : 0 }); Object.assign(t.config, patch); t.config.version++; CX.audit(t, actor, 'modelo_scoring_publicado', 'v' + t.config.version); CX.rebuild(t); t.executions.push({ id: 'wf_' + (t.idp || '') + (t.executions.length + 1), kind: 'Recalcular indicadores', trigger: 'Novo modelo de pontuação publicado', ref: 'v' + t.config.version, at: CX.now(), state: 'concluído', attempts: 1, ms: t.derived.ms, cost: 0, detail: t.derived.profiles.length + ' perfis' }); };
 
 /* ---------- segmentação ---------- */
 CX.SEGFIELDS = { level: ['Nível (L0 a L5)', 'num'], dqi: ['Data Quality Index', 'num'], qualification: ['Qualification Score', 'num'], contactability: ['Contactability Score', 'num'], freshness: ['Freshness Score', 'num'], completeness: ['Completeness Score', 'num'], entity_type: ['Tipo de entidade', 'txt'], segment: ['Segmento empresarial', 'txt'], state: ['UF', 'txt'], city: ['Cidade', 'txt'], job_title: ['Cargo', 'txt'], source: ['Fonte', 'txt'], email_type: ['Tipo de e-mail', 'txt'] };

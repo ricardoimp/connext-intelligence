@@ -20,8 +20,9 @@ CX.runEnrichment(store.tenants['connext-demo'], store.tenants['connext-demo'].de
 store.tenants['operacao-b'] = CX.newTenant('operacao-b', 'Operação B · vazia');
 const S = { tenant: 'connext-demo', role: 'admin', view: 'overview', f: { source: '', type: '', level: '', days: 0 }, lead: null, cand: 0, imp: null, run: null, queue: [], q: '', sort: 'dqi', seg: { name: 'Decisores com e-mail corporativo', purpose: 'sales_contact', op: 'AND', rules: [{ field: 'level', cmp: '>=', value: '3' }, { field: 'email_type', cmp: '=', value: 'corporativo' }, { field: 'qualification', cmp: '>=', value: '40' }] }, tests: null, ai: { out: '', busy: false, log: [] }, newSrc: false, eraseArm: null };
 let sampleFn = null, downloads = null;
+Object.assign(S, { hosted: false, me: null, canCreate: false, members: {}, pendingRaw: [], syncing: false, syncAgain: false, syncState: { s: '', msg: '' } });
 const T = () => CX.access(store, { tenant_id: S.tenant, user: actor() }, S.tenant);
-const actor = () => 'usuario:' + S.role;
+const actor = () => (S.me && store.tenants[S.tenant] && store.tenants[S.tenant].remote) ? S.me : 'usuario:' + S.role;
 const can = a => ROLES[S.role][1].includes(a);
 const guard = a => { if (can(a)) return true; toast('Seu papel (' + ROLES[S.role][0] + ') não permite esta ação.', true); CX.audit(store.tenants[S.tenant], actor(), 'acao_negada_rbac', a); return false; };
 function P() { const t = T(), f = S.f, now = CX.now(); return t.derived ? t.derived.profiles.filter(p => (!f.source || p.sources.includes(f.source)) && (!f.type || p.type === f.type) && (f.level === '' || p.level === +f.level) && (!f.days || p.updated_at >= now - f.days * DAY)) : []; }
@@ -347,8 +348,9 @@ V.admin = () => {
   const t = T();
   return `<div class="grid">
   ${card('c6', 'Organizações (tenants)', 'dados, chaves de identidade e auditoria isolados por tenant', tbl(['Tenant', 'n:Registros', 'n:Perfis', 'n:Fontes', ''], Object.values(store.tenants).map(x => `<tr><td><b>${esc(x.name)}</b><br><span class="mono muted">${esc(x.id)}</span></td><td class="n">${fmt(x.records.length)}</td><td class="n">${fmt(x.derived ? x.derived.profiles.length : 0)}</td><td class="n">${x.sources.length}</td><td>${x.id === S.tenant ? chip('ativo', 'good') : `<button class="btn sm" data-act="switchTenant" data-id="${esc(x.id)}">Entrar</button>`}</td></tr>`)) + `<form class="row" data-form="newTenant" style="margin-top:10px"><input type="text" id="ten-name" placeholder="Nome da nova organização" required><button class="btn">Criar tenant</button></form>`)}
+  ${t.remote ? card('c6', 'Membros da organização', 'papéis aplicados também pelo servidor', membersBody(t)) : card('c6', 'Membros da organização', '', S.hosted ? '<p class="note">Este é o tenant de demonstração local: não fica salvo no banco e não tem membros. Troque para uma organização real no seletor do topo.</p>' : '<p class="note">Disponível na versão hospedada, com login.</p>')}
   ${card('c6', 'Configurações do tenant ativo', esc(t.name), `<form class="form" data-form="cfg"><label>Orçamento de enriquecimento por período (R$)<input type="number" id="cfg-budget" min="0" step="10" value="${t.config.budget.enrichMonthly}"></label><label>Retenção padrão (dias)<input type="number" id="cfg-ret" min="30" step="30" value="${t.config.retentionDays}"></label><div class="row"><button class="btn">Salvar</button></div></form><div class="row" style="margin-top:12px"><button class="btn" data-act="theme">Alternar modo claro e escuro</button>${t.demo ? '<button class="btn" data-act="resetDemo">Restaurar dados de demonstração</button>' : ''}</div>`)}
-  ${card('c12', 'O que esta versão entrega', 'e o que fica para o backend', tbl(['Capacidade', 'Nesta versão web', 'Arquitetura alvo'], [['Ingestão de arquivos', 'Real: CSV, TSV, XLS, XLSX, JSON, JSONL, XML, com detecção de codificação e delimitador', 'Upload retomável em armazenamento de objetos, antimalware, Parquet'], ['Mapeamento inteligente', 'Real: nome da coluna, padrão dos valores, reutilização de mapeamentos aprovados', 'Sugestão adicional por Claude nos casos ambíguos'], ['Qualidade', 'Real: 12 regras determinísticas', 'Catálogo configurável por dataset'], ['Identidade', 'Real: blocking, pontuação, faixas, revisão, decisões reversíveis', 'Processamento distribuído para dezenas de milhões'], ['Golden record', 'Real: seleção determinística, evidências por campo, reconstrução', 'PostgreSQL com versões'], ['Scoring', 'Real: cinco indicadores, DQI versionado, níveis, elegibilidade bloqueante', 'Modelos por campanha e produto'], ['Enriquecimento', 'Real para derivações internas, adaptador externo de demonstração identificado', 'Provedores licenciados com contrato'], ['Claude', 'Real: análise sobre agregados, quando disponível na visualização', 'Agentes com tool use pela API no backend'], ['Persistência', 'Memória da sessão: recarregar a página restaura a demonstração', 'PostgreSQL, objetos, ClickHouse'], ['Segurança', 'Isolamento por tenant, RBAC e auditoria no motor', 'Autenticação, cofre, criptografia']].map(r => `<tr><td><b>${r[0]}</b></td><td>${r[1]}</td><td class="muted">${r[2]}</td></tr>`)))}</div>`;
+  ${card('c12', 'O que esta versão entrega', 'e o que fica para o backend', tbl(['Capacidade', 'Nesta versão web', 'Arquitetura alvo'], [['Ingestão de arquivos', 'Real: CSV, TSV, XLS, XLSX, JSON, JSONL, XML, com detecção de codificação e delimitador', 'Upload retomável em armazenamento de objetos, antimalware, Parquet'], ['Mapeamento inteligente', 'Real: nome da coluna, padrão dos valores, reutilização de mapeamentos aprovados', 'Sugestão adicional por Claude nos casos ambíguos'], ['Qualidade', 'Real: 12 regras determinísticas', 'Catálogo configurável por dataset'], ['Identidade', 'Real: blocking, pontuação, faixas, revisão, decisões reversíveis', 'Processamento distribuído para dezenas de milhões'], ['Golden record', 'Real: seleção determinística, evidências por campo, reconstrução', 'PostgreSQL com versões'], ['Scoring', 'Real: cinco indicadores, DQI versionado, níveis, elegibilidade bloqueante', 'Modelos por campanha e produto'], ['Enriquecimento', 'Real para derivações internas, adaptador externo de demonstração identificado', 'Provedores licenciados com contrato'], ['Claude', 'Real: análise sobre agregados, quando disponível na visualização', 'Agentes com tool use pela API no backend'], ['Persistência', S.hosted ? 'Real: banco Cloudflare D1 (modelo canônico, perfis mestres, versões, auditoria) e arquivos originais no R2' : 'Memória da sessão: recarregar a página restaura a demonstração', 'D1 hoje; PostgreSQL e objetos Parquet quando o volume exigir'], ['Segurança', S.hosted ? 'Login Cloudflare Access validado no servidor, isolamento por tenant e RBAC na API, auditoria gravada no banco' : 'Isolamento por tenant, RBAC e auditoria no motor', 'Cofre de segredos e criptografia por campo']].map(r => `<tr><td><b>${r[0]}</b></td><td>${r[1]}</td><td class="muted">${r[2]}</td></tr>`)))}</div>`;
 };
 
 /* ---------- moldura ---------- */
@@ -364,25 +366,26 @@ function renderTop() {
   <select data-ch="fLevel" id="f-level" aria-label="Nível"><option value="">Todos os níveis</option>${[0, 1, 2, 3, 4, 5].map(i => `<option value="${i}" ${f.level === String(i) ? 'selected' : ''}>L${i}</option>`).join('')}</select>
   <select data-ch="fDays" id="f-days" aria-label="Período"><option value="0">Todo o período</option>${[30, 60, 90].map(d => `<option value="${d}" ${f.days === d ? 'selected' : ''}>Últimos ${d} dias</option>`).join('')}</select>
   <select data-ch="tenant" id="f-tenant" aria-label="Organização">${Object.values(store.tenants).map(x => `<option value="${esc(x.id)}" ${x.id === S.tenant ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
-  <select data-ch="role" id="f-role" aria-label="Papel">${Object.entries(ROLES).map(([k, r]) => `<option value="${k}" ${S.role === k ? 'selected' : ''}>${r[0]}</option>`).join('')}</select>
+  ${t.remote ? `<span class="chip info" title="${esc(S.me || '')}">${esc(ROLES[S.role][0])}</span><span class="chip ${S.syncState.s === 'erro' ? 'crit' : S.syncState.s === 'salvando' ? 'warn' : 'good'}" id="sync-st" title="${esc(S.syncState.msg)}">${S.syncState.s === 'erro' ? 'Erro ao salvar' : S.syncState.s === 'salvando' ? 'Salvando' : 'Salvo no banco'}</span>` : `<select data-ch="role" id="f-role" aria-label="Papel">${Object.entries(ROLES).map(([k, r]) => `<option value="${k}" ${S.role === k ? 'selected' : ''}>${r[0]}</option>`).join('')}</select>${S.hosted ? '<span class="chip warn" title="Este tenant fica só neste navegador">Local, não salvo</span>' : ''}`}
   <button class="btn" data-act="theme" title="Alternar modo claro e escuro">◐</button>${location.protocol === 'https:' && !window.claude ? '<a class="btn" href="/cdn-cgi/access/logout">Sair</a>' : ''}`;
 }
 function render() {
   renderNav(); renderTop(); const m = $('#main'), y = m.scrollTop;
   try { m.innerHTML = V[S.view](); } catch (e) { m.innerHTML = `<div class="card note crit">Não foi possível montar esta tela: ${esc(e.message)}. Recarregue a página; se persistir, restaure os dados em Administration.</div>`; console.error(e); }
   if (S.view === 'explorer') initExplorer(); m.scrollTop = S._keep ? y : 0; S._keep = false;
+  scheduleSync();
 }
 const rerender = () => { S._keep = true; render(); };
 function route() { const h = location.hash.slice(1); S.view = VIEWS.some(v => v[0] === h) ? h : 'overview'; render(); }
 
 /* ---------- importação em lotes ---------- */
 async function loadFile(file) {
-  try { const u8 = new Uint8Array(await file.arrayBuffer()), t0 = performance.now(), parsed = CX.parseBytes(file.name, u8); stageImport(file.name, parsed, Math.round(performance.now() - t0)); }
+  try { const u8 = new Uint8Array(await file.arrayBuffer()), t0 = performance.now(), parsed = CX.parseBytes(file.name, u8); stageImport(file.name, parsed, Math.round(performance.now() - t0), u8, file.type); }
   catch (e) { toast('Não foi possível ler ' + file.name + ': ' + e.message, true); nextInQueue(); }
 }
-function stageImport(name, parsed, ms) {
+function stageImport(name, parsed, ms, bytes, mime) {
   const t = T(), sug = CX.suggestMapping(t, parsed.headers, parsed.rows), mapping = {}; sug.cols.forEach(c => { if (c.field) mapping[c.col] = c.field; });
-  const srcs = t.sources.filter(s => s.id !== 'src_manual'); S.imp = { name, parsed, sug, mapping, sourceId: (S.imp && S.imp.sourceId) || (srcs[0] && srcs[0].id) || '', ms };
+  const srcs = t.sources.filter(s => s.id !== 'src_manual'); S.imp = { name, parsed, sug, mapping, sourceId: (S.imp && S.imp.sourceId) || (srcs[0] && srcs[0].id) || '', ms, bytes };
   if (location.hash !== '#import') location.hash = 'import'; else render();
 }
 function nextInQueue() { S.imp = null; const f = S.queue.shift(); if (f) loadFile(f); else rerender(); }
@@ -398,7 +401,7 @@ function runImport() {
     CX.processChunk(t, r.job, rows, r.job.cursor, Math.min(total, r.job.cursor + chunk));
     const pb = $('#prog'), pt = $('#prog-t'); if (pb) pb.style.width = pct(r.job.cursor, total) + '%'; if (pt) pt.textContent = fmt(r.job.cursor) + ' de ' + fmt(total) + ' linhas';
     if (r.job.cursor < total) setTimeout(step, 25);
-    else { CX.finishImport(t, r.job); if (t.config.workflows.internalEnrichOnImport) CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['ddd_uf', 'master_link', 'domain_site'], { trigger: 'Novo registro recebido' }); S.run = null; toast(`${im.name}: ${fmt(r.job.st.normalized)} registros processados, ${fmt(t.derived.profiles.length)} entidades únicas no tenant.`); if (S.queue.length) nextInQueue(); else { S.imp = null; location.hash = 'pipeline'; } }
+    else { CX.finishImport(t, r.job); if (t.remote && im.bytes) S.pendingRaw.push({ tid: t.id, job: r.job, name: im.name, bytes: im.bytes }); if (t.config.workflows.internalEnrichOnImport) CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['ddd_uf', 'master_link', 'domain_site'], { trigger: 'Novo registro recebido' }); S.run = null; toast(`${im.name}: ${fmt(r.job.st.normalized)} registros processados, ${fmt(t.derived.profiles.length)} entidades únicas no tenant.`); if (S.queue.length) nextInQueue(); else { S.imp = null; location.hash = 'pipeline'; } }
   };
   S.run.step = step; setTimeout(step, 25);
 }
@@ -422,7 +425,7 @@ const ACT = {
   pause() { const r = S.run; if (!r) return; r.paused = !r.paused; if (!r.paused) setTimeout(r.step, 25); rerender(); },
   cancel() { const r = S.run; if (!r) return; r.cancelled = true; if (r.paused) { r.paused = false; setTimeout(r.step, 0); } },
   toggleSrc() { S.newSrc = !S.newSrc; rerender(); },
-  reprocess() { const t = T(), s1 = CX.signature(t); CX.rebuild(t); const same = CX.signature(t) === s1; t.executions.push({ id: 'wf_' + (t.executions.length + 1), kind: 'Reprocessamento', trigger: 'Solicitação de atualização', ref: 'todos', at: CX.now(), state: 'concluído', attempts: 1, ms: t.derived.ms, cost: 0, detail: same ? 'resultado idêntico (idempotente)' : 'perfis atualizados' }); CX.audit(t, actor(), 'reprocessamento', t.derived.ms + ' ms'); toast(`Reprocessado em ${t.derived.ms} ms. ${same ? 'Resultado idêntico ao anterior.' : 'Perfis atualizados.'}`); rerender(); },
+  reprocess() { const t = T(), s1 = CX.signature(t); CX.rebuild(t); const same = CX.signature(t) === s1; t.executions.push({ id: 'wf_' + (t.idp || '') + (t.executions.length + 1), kind: 'Reprocessamento', trigger: 'Solicitação de atualização', ref: 'todos', at: CX.now(), state: 'concluído', attempts: 1, ms: t.derived.ms, cost: 0, detail: same ? 'resultado idêntico (idempotente)' : 'perfis atualizados' }); CX.audit(t, actor(), 'reprocessamento', t.derived.ms + ' ms'); toast(`Reprocessado em ${t.derived.ms} ms. ${same ? 'Resultado idêntico ao anterior.' : 'Perfis atualizados.'}`); rerender(); },
   openLead(el) { S.lead = el.dataset.id; S.eraseArm = null; if (location.hash !== '#lead360') location.hash = 'lead360'; else render(); },
   candNav(el) { const n = T().derived.candidates.length; S.cand = (S.cand + +el.dataset.d + n) % n; rerender(); },
   decide(el) { if (!guard('merge')) return; CX.decide(T(), el.dataset.key, el.dataset.d, actor()); S.cand = 0; toast(el.dataset.d === 'merge' ? 'Perfis fundidos. A decisão pode ser desfeita no histórico.' : el.dataset.d === 'reject' ? 'Perfis mantidos separados.' : 'Decisão desfeita.'); rerender(); },
@@ -449,9 +452,13 @@ const ACT = {
   askPreset(el) { ask(el.dataset.q); },
   selftest() { toast('Executando os 18 cenários.'); setTimeout(() => { S.tests = CX.selfTest(); rerender(); }, 30); },
   switchTenant(el) { setTenant(el.dataset.id); },
+  memberRemove(el) {
+    const t = T(); if (!t.remote || !guard('config')) return;
+    CXSync.removeMember(t.id, el.dataset.email).then(() => { delete S.members[t.id]; toast('Acesso removido.'); rerender(); }).catch(e => toast('Não foi possível remover: ' + e.message, true));
+  },
   resetDemo() { if (!guard('config')) return; store.tenants['connext-demo'] = CX.loadDemo(CX.newTenant('connext-demo', 'Connext · demonstração')); S.lead = null; toast('Dados de demonstração restaurados.'); rerender(); }
 };
-function setTenant(id) { S.tenant = id; S.f = { source: '', type: '', level: '', days: 0 }; S.lead = null; S.imp = null; S.cand = 0; render(); }
+function setTenant(id) { const nt = store.tenants[id]; if (nt && nt.remote) S.role = nt.role; else if (S.hosted) S.role = 'admin'; S.tenant = id; S.f = { source: '', type: '', level: '', days: 0 }; S.lead = null; S.imp = null; S.cand = 0; render(); }
 const CH = {
   fSource: v => S.f.source = v, fType: v => S.f.type = v, fLevel: v => S.f.level = v, fDays: v => S.f.days = +v, tenant: v => { setTenant(v); return false; }, role: v => { S.role = v; },
   impSource: v => S.imp.sourceId = v, map: (v, el) => { S.imp.mapping[el.dataset.col] = v || null; const c = S.imp.sug.cols[+el.dataset.col]; c.ambiguous = false; c.basis = 'confirmado pelo usuário'; },
@@ -467,7 +474,20 @@ const FORMS = {
   suppress() { if (!guard('govern')) return; toast(CX.suppress(T(), $('#sup-type').value, $('#sup-value').value, actor()) ? 'Supressão registrada.' : 'Canal inválido: confira o formato.', false); },
   ask() { ask($('#ai-q').value); },
   icp() { if (!guard('config')) return; const sp = id => $('#' + id).value.split(',').map(s => s.trim()).filter(Boolean), t = T(); CX.publishModel(t, { icp: { segments: sp('icp-seg'), states: sp('icp-uf').map(s => s.toUpperCase()), titles: sp('icp-tit'), corpEmail: $('#icp-corp').checked } }, actor()); toast('Perfil ideal salvo. Modelo v' + t.config.version + ' publicado.'); },
-  newTenant() { if (!guard('config')) return; const name = $('#ten-name').value.trim(), id = CX.norm(name).replace(/ /g, '-') || 'tenant-' + Date.now(); if (store.tenants[id]) return toast('Já existe um tenant com esse nome.', true); store.tenants[id] = CX.newTenant(id, name); toast('Tenant criado, sem acesso a dados dos demais.'); },
+  newTenant() {
+    if (S.hosted) {
+      const name = $('#ten-name').value.trim(); if (!name) return false;
+      if (!S.canCreate) { toast('Seu usuário não pode criar organizações.', true); return false; }
+      CXSync.createTenant(name).then(async r => { toast('Organização criada no banco: ' + r.name + '.'); const t = await CXSync.loadTenant(r.id, r.role); store.tenants[t.id] = t; setTenant(t.id); }).catch(e => toast('Não foi possível criar: ' + e.message, true));
+      return false;
+    }
+    if (!guard('config')) return; const name = $('#ten-name').value.trim(), id = CX.norm(name).replace(/ /g, '-') || 'tenant-' + Date.now(); if (store.tenants[id]) return toast('Já existe um tenant com esse nome.', true); store.tenants[id] = CX.newTenant(id, name); toast('Tenant criado, sem acesso a dados dos demais.'); },
+  member() {
+    const t = T(); if (!t.remote || !guard('config')) return false;
+    const email = $('#mem-email').value.trim(), role = $('#mem-role').value;
+    CXSync.setMember(t.id, email, role).then(() => { delete S.members[t.id]; toast(email + ' agora é ' + ROLES[role][0] + ' em ' + t.name + '. Para entrar, o e-mail também precisa estar liberado na política de login.'); rerender(); }).catch(e => toast('Não foi possível salvar: ' + e.message, true));
+    return false;
+  },
   cfg() { if (!guard('config')) return; const t = T(); t.config.budget.enrichMonthly = Math.max(0, +$('#cfg-budget').value || 0); t.config.retentionDays = Math.max(30, +$('#cfg-ret').value || 730); CX.audit(t, actor(), 'configuracao_alterada', 'orçamento e retenção'); toast('Configurações salvas.'); }
 };
 async function ask(q) {
@@ -489,5 +509,66 @@ window.addEventListener('hashchange', route);
 const tip = $('#tip');
 document.addEventListener('mousemove', e => { const el = e.target.closest && e.target.closest('[data-tip]'); if (!el) { tip.style.display = 'none'; return; } const parts = el.dataset.tip.split('|'); tip.textContent = ''; parts.forEach((p, i) => { const n = document.createElement(i ? 'span' : 'b'); n.textContent = p; tip.appendChild(n); }); tip.style.display = 'block'; const w = tip.offsetWidth, h = tip.offsetHeight; tip.style.left = Math.min(innerWidth - w - 8, e.clientX + 14) + 'px'; tip.style.top = (e.clientY + h + 24 > innerHeight ? e.clientY - h - 10 : e.clientY + 16) + 'px'; });
 if (window.claude && window.claude.use) { window.claude.use('sample').then(s => { sampleFn = s; const el = $('#ai-status'); if (el) el.textContent = s ? 'Claude disponível nesta visualização.' : 'Claude não disponível nesta visualização. As demais telas funcionam normalmente.'; }).catch(() => {}); window.claude.use('downloads').then(d => { downloads = d; }).catch(() => {}); }
-route();
+function membersBody(t) {
+  const list = S.members[t.id];
+  if (!list) { CXSync.members(t.id).then(m => { S.members[t.id] = m; if (S.view === 'admin') rerender(); }).catch(e => { S.members[t.id] = { error: e.message }; if (S.view === 'admin') rerender(); }); return '<p class="muted">Carregando membros.</p>'; }
+  if (list.error) return `<p class="note crit">${esc(list.error)}</p>`;
+  const adm = can('config');
+  return tbl(['E-mail', 'Papel', 'Último acesso', ''], list.map(m => `<tr><td>${esc(m.email)}${m.email === S.me ? ' ' + chip('você', 'plain') : ''}</td><td>${esc(ROLES[m.role] ? ROLES[m.role][0] : m.role)}</td><td>${m.last_seen_at ? dtm(m.last_seen_at) : '<span class="muted">nunca entrou</span>'}</td><td>${adm && m.email !== S.me ? `<button class="btn sm dan" data-act="memberRemove" data-email="${esc(m.email)}">Remover</button>` : ''}</td></tr>`))
+    + (adm ? `<form class="row" data-form="member" style="margin-top:10px"><input type="text" id="mem-email" placeholder="email@empresa.com" required style="flex:1;min-width:180px"><select id="mem-role">${Object.entries(ROLES).map(([k, r]) => `<option value="${k}">${r[0]}</option>`).join('')}</select><button class="btn">Adicionar ou alterar</button></form><p class="muted">A pessoa também precisa estar liberada na política de login da Cloudflare (domínios @connextintelligence.com e @connextgov.com já estão).</p>` : '');
+}
+
+/* ---------- sincronização com o banco ---------- */
+let syncTimer = null;
+function setSync(s, msg) { S.syncState = { s, msg: msg || '' }; const el = $('#sync-st'); if (!el) return; el.className = 'chip ' + (s === 'erro' ? 'crit' : s === 'salvando' ? 'warn' : 'good'); el.textContent = s === 'erro' ? 'Erro ao salvar' : s === 'salvando' ? 'Salvando' + (msg ? ' ' + msg : '') : 'Salvo no banco'; el.title = msg || ''; }
+function scheduleSync() { if (!S.hosted) return; clearTimeout(syncTimer); syncTimer = setTimeout(flush, 700); }
+async function flush() {
+  syncTimer = null;
+  if (S.run) { scheduleSync(); return; }
+  if (S.syncing) { S.syncAgain = true; return; }
+  const remotes = Object.values(store.tenants).filter(t => t.remote); if (!remotes.length) return;
+  S.syncing = true;
+  try {
+    for (const t of remotes) {
+      let r = await CXSync.push(t, (i, n) => { if (n > 1) setSync('salvando', i + '/' + n); else setSync('salvando'); });
+      if (r.denied && r.denied.length) toast('O servidor recusou alterações sem permissão: ' + r.denied.join(', '), true);
+      const raws = S.pendingRaw.filter(x => x.tid === t.id);
+      for (const x of raws) {
+        setSync('salvando', 'arquivo original');
+        const res = await CXSync.uploadRaw(t.id, x.job.id, x.name, x.bytes); x.job.raw_key = res.key;
+        S.pendingRaw.splice(S.pendingRaw.indexOf(x), 1);
+      }
+      if (raws.length) await CXSync.push(t);
+    }
+    setSync('ok', 'Última gravação ' + new Date().toLocaleTimeString('pt-BR'));
+  } catch (e) {
+    setSync('erro', e.message);
+    if (e.status === 401) toast('Sua sessão de login expirou. Recarregue a página para entrar de novo; nada do que já foi salvo se perdeu.', true);
+    else toast('Não foi possível salvar no banco: ' + e.message + '. Vou tentar de novo.', true);
+    setTimeout(scheduleSync, 8000);
+  }
+  S.syncing = false;
+  if (S.syncAgain) { S.syncAgain = false; scheduleSync(); }
+}
+window.addEventListener('beforeunload', e => { if (S.hosted && (S.syncing || syncTimer || S.pendingRaw.length || S.run)) { e.preventDefault(); e.returnValue = ''; } });
+
+async function boot() {
+  const ses = window.CXSync ? await CXSync.init() : null;
+  if (ses && ses.status === 401) { S.hosted = true; route(); $('#main').innerHTML = `<div class="card note crit">${esc(ses.error)}</div>`; return; }
+  if (ses && ses.ok) {
+    S.hosted = true; S.me = ses.email; S.canCreate = ses.canCreateTenants;
+    delete store.tenants['operacao-b']; store.tenants['connext-demo'].name = 'Demonstração local · dados sintéticos';
+    renderNav(); renderTop();
+    for (const m of ses.tenants) {
+      $('#main').innerHTML = `<div class="card empty"><p>Carregando <b>${esc(m.name)}</b> do banco de dados.</p><p class="mono muted" id="boot-p"></p></div>`;
+      try { const t = await CXSync.loadTenant(m.id, m.role, (got, total) => { const el = $('#boot-p'); if (el) el.textContent = fmt(got) + ' de ' + fmt(total) + ' registros'; }); store.tenants[t.id] = t; }
+      catch (e) { toast('Não foi possível carregar ' + m.name + ': ' + e.message, true); }
+    }
+    const first = ses.tenants.find(m => store.tenants[m.id]);
+    if (first) { S.tenant = first.id; S.role = first.role; }
+    else toast('O e-mail ' + ses.email + ' ainda não pertence a nenhuma organização. Peça a um administrador para adicioná-lo. Enquanto isso, você vê só a demonstração local.', true);
+  }
+  route();
+}
+boot();
 })();

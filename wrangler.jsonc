@@ -1,12 +1,37 @@
 {
-  // Connext Intelligence: site estatico servido por Cloudflare Workers (static assets)
+  // Connext Intelligence: interface estatica + API em Cloudflare Workers
   "name": "connext-intelligence",
+  "main": "src/index.js",
   "compatibility_date": "2026-11-18",
-  "assets": { "directory": "./public" },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
   // Sem enderecos publicos alternativos: so o dominio protegido pelo Access responde
   "workers_dev": false,
   "preview_urls": false,
   "routes": [
     { "pattern": "plataforma.connextintelligence.com", "custom_domain": true }
-  ]
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "connext-intelligence",
+      "database_id": "c3b1109b-ed06-49ef-ae3d-6f48f66c7d4c",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "RAW", "bucket_name": "connext-raw" }
+  ],
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "https://tiny-surf-a088.cloudflareaccess.com",
+    "ACCESS_AUD": "2e7a47a2656372741edb2d43a4dabd9a92379e512cbf30ff522987c63d9af98e",
+    "BOOTSTRAP_ADMINS": "ricardoimp@gmail.com",
+    "AUTO_JOIN_DOMAINS": "connextintelligence.com,connextgov.com",
+    "HOME_TENANT_ID": "connext",
+    "HOME_TENANT_NAME": "Connext Intelligence"
+  },
+  "observability": { "enabled": true }
 }
