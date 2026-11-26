@@ -76,9 +76,12 @@ const DELETE_NEED = { source_records: 'import', enrichment_results: 'enrich', ca
 async function runBatch(env, stmts) {
   for (let i = 0; i < stmts.length; i += 90) await env.DB.batch(stmts.slice(i, i + 90));
 }
+// gravações acessórias (uso, auditoria de leitura, último acesso) nunca podem impedir a leitura dos dados
+const LIMIT_RE = /daily row write limit|row write limit|exceeded D1/i;
 async function usage(env, tid, ep) {
+  if (/^GET (changes|records|load|tenant|ai)$/.test(ep)) return;
   const day = new Date().toISOString().slice(0, 10);
-  await env.DB.prepare('INSERT INTO api_usage (tenant_id, day, endpoint, calls) VALUES (?,?,?,1) ON CONFLICT(tenant_id, day, endpoint) DO UPDATE SET calls = calls + 1').bind(tid, day, ep).run();
+  try { await env.DB.prepare('INSERT INTO api_usage (tenant_id, day, endpoint, calls) VALUES (?,?,?,1) ON CONFLICT(tenant_id, day, endpoint) DO UPDATE SET calls = calls + 1').bind(tid, day, ep).run(); } catch (e) { console.error('uso não registrado: ' + e.message); }
 }
 const rid = () => crypto.randomUUID().replace(/-/g, '').slice(0, 20);
 const hex = buf => Array.from(new Uint8Array(buf), b => b.toString(16).padStart(2, '0')).join('');
@@ -86,13 +89,13 @@ async function newSalt() { return hex(crypto.getRandomValues(new Uint8Array(16))
 const slug = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'tenant';
 
 async function audit(env, tid, actor, action, detail, ref) {
-  await env.DB.prepare('INSERT INTO audit_events (tenant_id, id, at, actor, action, detail, ref) VALUES (?,?,?,?,?,?,?)').bind(tid, 'srv_' + rid(), now(), actor, action, detail || '', ref || null).run();
+  try { await env.DB.prepare('INSERT INTO audit_events (tenant_id, id, at, actor, action, detail, ref) VALUES (?,?,?,?,?,?,?)').bind(tid, 'srv_' + rid(), now(), actor, action, detail || '', ref || null).run(); } catch (e) { console.error('auditoria não registrada: ' + e.message); if (!LIMIT_RE.test(e.message)) throw e; }
 }
 
 /* ---------- sessão e associação ---------- */
 async function session(env, email) {
   const t = now();
-  await env.DB.prepare('INSERT INTO users (email, created_at, last_seen_at) VALUES (?,?,?) ON CONFLICT(email) DO UPDATE SET last_seen_at = excluded.last_seen_at').bind(email, t, t).run();
+  try { await env.DB.prepare('INSERT INTO users (email, created_at, last_seen_at) VALUES (?,?,?) ON CONFLICT(email) DO UPDATE SET last_seen_at = excluded.last_seen_at').bind(email, t, t).run(); } catch (e) { console.error('último acesso não registrado: ' + e.message); }
   let rows = (await env.DB.prepare('SELECT m.tenant_id AS id, t.name, m.role_id AS role FROM memberships m JOIN tenants t ON t.id = m.tenant_id WHERE m.email = ? AND t.status = ? ORDER BY t.created_at').bind(email, 'ativo').all()).results;
   const admins = String(env.BOOTSTRAP_ADMINS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
   const domains = String(env.AUTO_JOIN_DOMAINS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
@@ -476,6 +479,8 @@ export default {
       }
       return fail(404, 'Rota não encontrada.');
     } catch (e) {
+      console.error('erro: ' + (e && e.stack || e));
+      if (LIMIT_RE.test(String(e && e.message))) return fail(507, 'O banco atingiu o limite diário de gravações do plano gratuito da Cloudflare (100 mil por dia). A leitura continua funcionando; novas gravações voltam à meia-noite UTC (21h de Brasília) ou imediatamente com o plano Workers Paid.');
       return fail(500, 'Erro no servidor: ' + (e && e.message || e));
     }
   },

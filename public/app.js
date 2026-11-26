@@ -910,10 +910,11 @@ async function boot() {
     for (const m of ses.tenants) {
       splash('Carregando ' + m.name);
       try { const t = await CXSync.loadTenant(m.id, m.role, (got, total) => { splash('Carregando ' + m.name + ' · ' + fmt(got) + ' de ' + fmt(total) + ' registros', total ? got / total : null); if (got >= total) splash('Preparando os perfis de ' + m.name); }); store.tenants[t.id] = t; }
-      catch (e) { toast('Não foi possível carregar ' + m.name + ': ' + e.message, true); }
+      catch (e) { S.loadErr = e.message; toast('Não foi possível carregar ' + m.name + ': ' + e.message, true); }
     }
     const first = ses.tenants.find(m => store.tenants[m.id]);
     if (first) { S.tenant = first.id; S.role = first.role; }
+    else if (ses.tenants.length) { document.body.classList.remove('booting'); renderNav(); renderTop(); $('#main').innerHTML = `<div class="card note crit" style="max-width:760px"><b>Não foi possível carregar ${esc(ses.tenants[0].name)} do banco de dados.</b><p>${esc(S.loadErr || 'Erro desconhecido.')}</p><p class="muted">Seus dados continuam guardados. Nada foi apagado.</p><button class="btn pri" onclick="location.reload()">Tentar de novo</button></div>`; return; }
     else { makeDemo(true); toast('O e-mail ' + ses.email + ' ainda não pertence a nenhuma organização. Peça a um administrador para adicioná-lo. Enquanto isso, você vê só a demonstração local.', true); }
   } else makeDemo(false);
   document.body.classList.remove('booting');
