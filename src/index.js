@@ -74,7 +74,7 @@ const TABLES = {
 const DELETE_NEED = { source_records: 'import', enrichment_results: 'enrich', canonical_entities: 'import', golden_profile_versions: 'govern', identity_match_candidates: 'import' };
 
 async function runBatch(env, stmts) {
-  for (let i = 0; i < stmts.length; i += 90) await env.DB.batch(stmts.slice(i, i + 90));
+  for (let i = 0; i < stmts.length; i += 500) await env.DB.batch(stmts.slice(i, i + 500));  // lotes maiores: menos idas ao banco por requisição
 }
 // gravações acessórias (uso, auditoria de leitura, último acesso) nunca podem impedir a leitura dos dados
 const LIMIT_RE = /daily row write limit|row write limit|exceeded D1/i;
