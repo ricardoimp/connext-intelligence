@@ -104,6 +104,7 @@ function nEmail(v) {
   return R(s, true, 'valid', FREE.has(dom) ? 'domínio de e-mail gratuito · sintaxe válida, caixa postal não verificada' : 'domínio corporativo · sintaxe válida, caixa postal não verificada');
 }
 function nPhone(v) {
+  if (/[a-df-wyz]/i.test(String(v).replace(/\b(ramal|ext|tel|cel|fone|whatsapp)\b/gi, ''))) return R(String(v).trim(), false, 'invalid', 'contém letras: não é telefone');
   const s = String(v).trim(); const plus = s.startsWith('+') || s.startsWith('00');
   let d = s.replace(/\D/g, ''); if (s.startsWith('00')) d = d.slice(2);
   if (!d) return R(s, false, 'invalid', 'sem dígitos');
@@ -365,10 +366,12 @@ CX.beginImport = function (t, m) {
   const version = t.imports.filter(i => i.fileName === m.fileName && i.sourceId === m.sourceId).length + 1;
   const src0 = t.sources.find(s => s.id === m.sourceId);
   const job = { origin: { source_id: m.sourceId, source_name: src0 ? src0.name : m.sourceId, import_id: null, file: m.fileName, by: m.actor || 'sistema', channel: 'arquivo', at: m.at || CX.now() }, id: 'imp_' + (t.idp || '') + (t.imports.length + 1), sourceId: m.sourceId, fileName: m.fileName, fileHash: m.fileHash, format: m.format, encoding: m.encoding, bytes: m.bytes || 0, version, at: m.at || CX.now(), actor: m.actor || 'sistema', status: 'processando', mapping: m.mapping, total: m.total || 0, cursor: 0, parseErrors: m.parseErrors || [], rowErrors: [], st: { received: (m.total || 0) + (m.parseErrors || []).filter(e => !e.warn).length, extracted: m.total || 0, mapped: 0, normalized: 0, validated: 0 }, ms: { extract: m.msExtract || 0, normalize: 0, resolve: 0 }, recIds: [] };
-  job.origin.import_id = job.id; t.imports.push(job);
+  job.origin.import_id = job.id; if (m.columnNames) job.columnNames = m.columnNames; t.imports.push(job);
   if (m.sig) t.mappings[m.sig] = { map: m.headerMap || {}, at: CX.now(), used: (t.mappings[m.sig] ? t.mappings[m.sig].used : 0) + 1, fileName: m.fileName };
   return { job };
 };
+// colunas da mesma linha mapeadas para o mesmo campo são unidas (ex.: primeiro nome + sobrenome)
+const JOIN = { full_name: ' ', org_name: ' ', address: ', ', notes: ' · ' };
 CX.processChunk = function (t, job, rows, start, end) {
   const t0 = Date.now(), map = job.mapping;
   for (let i = start; i < end; i++) {
@@ -376,7 +379,9 @@ CX.processChunk = function (t, job, rows, start, end) {
     let any = false, anyValid = false;
     for (const c in map) {
       const field = map[c], v = arr[c]; if (!field || v === '' || v == null) continue;
-      const n = CX.isCustom(field) ? nCustom(v) : CX.normalize(field, v); n.raw = String(v); n.col = +c; (rec.f[field] = rec.f[field] || []).push(n); any = true; if (n.valid) anyValid = true;
+      const prev = JOIN[field] && rec.f[field] && rec.f[field].find(x => x.row === i);
+      if (prev) { const raw = prev.raw + JOIN[field] + String(v).trim(), n = CX.normalize(field, raw); Object.assign(prev, n, { raw, cols: (prev.cols || [prev.col]).concat(+c) }); if (n.valid) anyValid = true; if (INJECTION.test(raw)) { rec.flags = rec.flags || {}; rec.flags.injection = true; } continue; }
+      const n = CX.isCustom(field) ? nCustom(v) : CX.normalize(field, v); n.raw = String(v); n.col = +c; if (JOIN[field]) n.row = i; (rec.f[field] = rec.f[field] || []).push(n); any = true; if (n.valid) anyValid = true;
       if (INJECTION.test(n.raw)) { rec.flags = rec.flags || {}; rec.flags.injection = true; }
     }
     if (!any) { job.rowErrors.push({ row: i + 1, msg: 'nenhum campo mapeado preenchido, registro descartado' }); continue; }
@@ -716,6 +721,7 @@ CX.selfTest = function () {
   T('17 · Reconstrução do Golden Record', () => { const t = mk(); imp(t, 'nome,email,telefone\nAna Lima,ana@acme.example,(11) 98888-7777\nAna Lima,ana@acme.example,\nBia Souza,bia@acme.example,(21) 97777-6666'); CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['ddd_uf']); const s1 = CX.signature(t); t.derived = null; CX.rebuild(t); return { ok: CX.signature(t) === s1, detail: 'perfis idênticos após reconstrução a partir de registros, decisões e evidências' }; });
   T('18 · Registro de custos e auditoria', () => { const t = mk(); t.config.budget.enrichMonthly = 10; imp(t, 'nome,email\nAna Lima,ana@acme.example'); const run = CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['demo_b2b']); const p = t.derived.profiles[0]; return { ok: run.cost === 0.35 && t.spend === 0.35 && t.audit.some(a => a.action === 'enriquecimento_executado') && p.fields.job_title.synthetic === true && p.scores.completeness === 36, detail: 'custo R$ 0,35 registrado, valor sintético fora dos indicadores' }; });
   T('19 · Classificação de etapa do funil', () => { const t = mk(); imp(t, 'nome,email,status,observacoes\nAna Lima,ana@acme.example,Closed Won,\nBia Souza,bia@acme.example,Proposta enviada,\nCaio Dias,caio@acme.example,,Pediu retorno em março\nDani Reis,dani@acme.example,,'); const st = n => t.derived.profiles.find(p => p.name === n).stage; return { ok: st('Ana Lima').stage === 'cliente' && st('Bia Souza').stage === 'negociacao' && st('Caio Dias').needsAI && !st('Dani Reis').needsAI, detail: 'regras resolvem status conhecidos; observações livres vão para a IA' }; });
+  T('21 · Primeiro nome e sobrenome em colunas separadas', () => { const t = mk(), p = CX.parseText('n.csv', 'Eric,Silva,eric@acme.example\nLeticia,Chuder,leticia@acme.example'); CX.importSync(t, { sourceId: t.sources[0].id, fileName: 'n.csv', fileHash: 'h21', format: 'CSV', encoding: 'UTF-8', at: CX.now(), actor: 'teste', mapping: { 0: 'full_name', 1: 'full_name', 2: 'email' }, headerMap: {}, sig: 'y' }, p.rows); const names = t.derived.profiles.map(x => x.name).sort(); return { ok: names[0] === 'Eric Silva' && names[1] === 'Leticia Chuder' && p.headers[0] === 'coluna_1', detail: 'arquivo sem cabeçalho reconhecido e colunas de nome unidas em Nome completo' }; });
   T('20 · Campo personalizado criado na importação', () => {
     const csv = 'Nome,E-mail,MAC\nAna Lima,ana@acme.example,06:BA:9F:E2:91:18\nAna Lima,ana@acme.example,0A:3B:93:93:83:E1\nBia Souza,bia@acme.example,22:05:14:35:2F:6A';
     const run = withMac => { const t = mk(), p = CX.parseText('wifi.csv', csv), k = CX.customKey('MAC'); const mapping = { 0: 'full_name', 1: 'email' }; if (withMac) { CX.addCustomField(t, 'MAC', 'teste', { samples: p.rows.map(r => r[2]) }); mapping[2] = k; } CX.importSync(t, { sourceId: t.sources[0].id, fileName: 'wifi.csv', fileHash: CX.hash(csv), format: 'CSV', encoding: 'UTF-8', at: CX.now(), actor: 'teste', mapping, headerMap: {}, sig: 'x' }, p.rows); return t; };

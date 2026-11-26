@@ -177,10 +177,10 @@ V.import = () => {
   else if (im) {
     const p = im.parsed, src = t.sources.find(s => s.id === im.sourceId), miss = CX.sourcePolicy(src), amb = im.sug.cols.filter(c => c.ambiguous).length, sens = im.sug.cols.filter(c => c.sensitive).length;
     body = `<div class="stack"><div class="row"><b>${esc(im.name)}</b>${chip(p.format, 'info')}${chip(p.encoding, 'plain')}${p.delimiter ? chip('delimitador ' + ({ ',': 'vírgula', ';': 'ponto e vírgula', '\t': 'tabulação', '|': 'barra' })[p.delimiter], 'plain') : ''}${chip(fmt(p.rows.length) + ' linhas', 'plain')}${p.errors.length ? chip(p.errors.length + ' linhas com problema', 'warn') : chip('estrutura íntegra', 'good')}${im.sug.reused ? chip('mapeamento reutilizado', 'good') : ''}<span class="mono muted">hash ${p.fileHash}</span></div>
-    <div class="row"><label>Fonte de destino <select data-ch="impSource">${t.sources.filter(s => s.id !== 'src_manual').map(s => `<option value="${s.id}" ${s.id === im.sourceId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label><a class="btn sm" href="#sources">Cadastrar fonte</a>${!t.sources.length ? chip('cadastre uma fonte antes de importar', 'crit') : miss.length ? chip('bloqueada pela política: falta ' + miss.join(', '), 'crit') : chip('origem, base legal e finalidade conferidas', 'good')}</div>
+    <div class="row"><label>Fonte de destino <select data-ch="impSource"><option value="" disabled ${!im.sourceId ? 'selected' : ''}>Selecione a fonte</option>${t.sources.filter(s => s.id !== 'src_manual').map(s => `<option value="${s.id}" ${s.id === im.sourceId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label><a class="btn sm" href="#sources">Cadastrar fonte</a>${!t.sources.length ? chip('cadastre uma fonte antes de importar', 'crit') : !src ? chip('selecione a fonte de destino antes de importar', 'warn') : miss.length ? chip('bloqueada pela política: falta ' + miss.join(', '), 'crit') : chip('origem, base legal e finalidade conferidas', 'good')}</div>
     ${amb || sens ? `<div class="note">${amb ? amb + ' coluna(s) com mapeamento ambíguo: confirme antes de importar. ' : ''}${sens ? sens + ' coluna(s) com atributo sensível foram excluídas da importação.' : ''}</div>` : ''}
     ${t.remote ? decisionPanel(t, im) : ''}
-    ${tbl(['Coluna do arquivo', 'Amostras', 'Campo canônico', 'Confiança', 'Base da sugestão'].concat(im.ai ? ['Leitura da CONNEXT IA'] : []), im.sug.cols.map(c => `<tr><td><b>${esc(c.header)}</b></td><td class="mono muted">${c.samples.map(s => esc(String(s).slice(0, 34))).join('<br>') || 'vazia'}</td><td>${c.sensitive ? chip('sensível, não importado', 'crit') : `<select data-ch="map" data-col="${c.col}">${fieldOptions(t, im.mapping[c.col] || '', c.header)}</select>${isNewField(t, im.mapping[c.col]) ? `<div style="margin-top:4px">${chip('campo novo: será criado na base ao importar', 'info')}</div>` : CX.isCustom(im.mapping[c.col]) ? `<div style="margin-top:4px">${chip('campo personalizado', 'plain')}</div>` : ''}`}</td><td style="min-width:110px">${c.field ? `<div class="row"><span class="mono">${Math.round(c.confidence * 100)}%</span>${meter(c.confidence * 100, c.ambiguous ? 'var(--warn)' : 'var(--good)')}</div>` : '<span class="muted">n/d</span>'}</td><td class="muted">${esc(c.basis)}${c.ambiguous ? ' ' + chip('confirmar', 'warn') : ''}</td>${im.ai ? aiCell(im.ai, c.col) : ''}</tr>`))}
+    ${tbl(['Coluna do arquivo', 'Amostras', 'Campo canônico', 'Confiança', 'Base da sugestão'].concat(im.ai ? ['Leitura da CONNEXT IA'] : []), im.sug.cols.map(c => { const nm = dispName(t, c, im.names, im.mapping); return `<tr><td style="min-width:170px"><input type="text" class="colname" data-ch="colName" data-col="${c.col}" value="${esc(nm)}" maxlength="60" aria-label="Nome da coluna" title="Clique para renomear">${nm !== c.header ? `<div class="muted" style="font-size:11px;margin-top:3px">original: <span class="mono">${esc(c.header)}</span>${im.names[c.col] ? ' · nome manual' : ' · nome reconhecido'}</div>` : ''}</td><td class="mono muted">${c.samples.map(s => esc(String(s).slice(0, 34))).join('<br>') || 'vazia'}</td><td>${c.sensitive ? chip('sensível, não importado', 'crit') : `<select data-ch="map" data-col="${c.col}">${fieldOptions(t, im.mapping[c.col] || '', nm)}</select>${isNewField(t, im.mapping[c.col]) ? `<div style="margin-top:4px">${chip('campo novo: será criado na base ao importar', 'info')}</div>` : CX.isCustom(im.mapping[c.col]) ? `<div style="margin-top:4px">${chip('campo personalizado', 'plain')}</div>` : ''}`}</td><td style="min-width:110px">${c.field ? `<div class="row"><span class="mono">${Math.round(c.confidence * 100)}%</span>${meter(c.confidence * 100, c.ambiguous ? 'var(--warn)' : 'var(--good)')}</div>` : '<span class="muted">n/d</span>'}</td><td class="muted">${esc(c.basis)}${c.ambiguous ? ' ' + chip('confirmar', 'warn') : ''}</td>${im.ai ? aiCell(im.ai, c.col) : ''}</tr>`; }))}
     <details><summary>Prévia das 6 primeiras linhas</summary>${tbl(p.headers.map(esc), p.rows.slice(0, 6).map(r => `<tr>${r.map(c => `<td class="mono">${esc(String(c).slice(0, 40))}</td>`).join('')}</tr>`))}</details>
     ${p.errors.length ? `<details><summary>${p.errors.length} linhas com problema estrutural</summary>${tbl(['n:Linha', 'Problema', 'Conteúdo'], p.errors.slice(0, 50).map(e => `<tr><td class="n">${e.row}</td><td>${esc(e.msg)}</td><td class="mono muted">${esc(e.raw || '')}</td></tr>`))}<p class="muted">Corrija essas linhas no arquivo e reenvie: o hash muda e só as linhas novas geram registros adicionais na mesma fonte após a resolução de identidade.</p></details>` : ''}
     <div class="row"><button class="btn pri" data-act="runImport" ${miss.length || !Object.values(im.mapping).some(Boolean) || (t.remote && !im.ai) ? 'disabled' : ''}>${t.remote && !im.ai ? 'Aguardando a análise da CONNEXT IA' : 'Importar ' + fmt(p.rows.length) + ' linhas'}</button><button class="btn" data-act="discard">Descartar</button>${S.queue.length ? `<span class="muted">${S.queue.length} arquivo(s) na fila</span>` : ''}</div></div>`;
@@ -401,14 +401,14 @@ async function loadFile(file) {
 }
 function stageImport(name, parsed, ms, bytes, mime) {
   const t = T(), sug = CX.suggestMapping(t, parsed.headers, parsed.rows), mapping = {}; sug.cols.forEach(c => { if (c.field) mapping[c.col] = c.field; });
-  const srcs = t.sources.filter(s => s.id !== 'src_manual'); S.imp = { name, parsed, sug, mapping, sourceId: (S.imp && S.imp.sourceId) || (srcs[0] && srcs[0].id) || '', ms, bytes };
+  const srcs = t.sources.filter(s => s.id !== 'src_manual'); S.imp = { name, parsed, sug, mapping, names: {}, sourceId: '', ms, bytes };
   if (location.hash !== '#import') location.hash = 'import'; else render();
   if (t.remote) setTimeout(analyzeImport, 50);
 }
 function nextInQueue() { S.imp = null; const f = S.queue.shift(); if (f) loadFile(f); else rerender(); }
 async function runImport() {
   if (!guard('import')) return; const t = T(), im = S.imp, headerMap = {}; im.sug.cols.forEach(c => headerMap[c.header] = im.mapping[c.col] || null);
-  const b = CX.beginImport(t, { sourceId: im.sourceId, fileName: im.name, fileHash: im.parsed.fileHash, format: im.parsed.format, encoding: im.parsed.encoding, bytes: im.parsed.bytes, actor: actor(), mapping: im.mapping, headerMap, sig: im.sug.sig, parseErrors: im.parsed.errors, total: im.parsed.rows.length, msExtract: im.ms });
+  const b = CX.beginImport(t, { sourceId: im.sourceId, fileName: im.name, fileHash: im.parsed.fileHash, format: im.parsed.format, encoding: im.parsed.encoding, bytes: im.parsed.bytes, actor: actor(), mapping: im.mapping, headerMap, columnNames: Object.fromEntries(im.sug.cols.map(c => [c.col, dispName(t, c, im.names, im.mapping)])), sig: im.sug.sig, parseErrors: im.parsed.errors, total: im.parsed.rows.length, msExtract: im.ms });
   if (b.blocked || b.skipped) { toast(b.reason, b.blocked); if (b.skipped) nextInQueue(); return; }
   if (t.remote) {
     if (!im.ai) { CX.cancelImport(t, b.job, actor()); t.imports.pop(); return toast('O arquivo precisa ser analisado pela CONNEXT IA antes de gravar.', true); }
@@ -419,7 +419,7 @@ async function runImport() {
     } catch (e) { CX.cancelImport(t, b.job, actor()); t.imports.splice(t.imports.indexOf(b.job), 1); return toast('Importação não iniciada: ' + e.message, true); }
   }
   // colunas mapeadas para campo novo: a definição do campo é criada na base antes de gravar os valores
-  const created = []; im.sug.cols.forEach(c => { const k = im.mapping[c.col]; if (isNewField(t, k)) created.push(CX.addCustomField(t, c.header, actor(), { k, column: c.header, samples: im.parsed.rows.slice(0, 200).map(r => r[c.col]), source_id: im.sourceId, import_id: b.job.id }).label); });
+  const created = []; im.sug.cols.forEach(c => { const k = im.mapping[c.col]; if (isNewField(t, k)) created.push(CX.addCustomField(t, dispName(t, c, im.names, im.mapping), actor(), { k, column: c.header, samples: im.parsed.rows.slice(0, 200).map(r => r[c.col]), source_id: im.sourceId, import_id: b.job.id }).label); });
   if (created.length) toast('Campo(s) novo(s) criado(s) na base: ' + created.join(', ') + '.');
   const rows = im.parsed.rows, total = rows.length, chunk = Math.max(250, Math.min(5000, Math.ceil(total / 30)));
   S.run = { job: b.job, total, paused: false, cancelled: false }; rerender();
@@ -506,7 +506,8 @@ const ACT = {
 function setTenant(id) { const nt = store.tenants[id]; if (nt && nt.remote) S.role = nt.role; else if (S.hosted) S.role = 'admin'; S.tenant = id; S.f = { source: '', type: '', level: '', days: 0 }; S.lead = null; S.imp = null; S.cand = 0; render(); }
 const CH = {
   fSource: v => S.f.source = v, fType: v => S.f.type = v, fLevel: v => S.f.level = v, fDays: v => S.f.days = +v, tenant: v => { setTenant(v); return false; }, role: v => { S.role = v; },
-  impSource: v => S.imp.sourceId = v, map: (v, el) => { S.imp.mapping[el.dataset.col] = v || null; const c = S.imp.sug.cols[+el.dataset.col]; c.ambiguous = false; c.basis = isNewField(T(), v) ? 'campo novo criado pelo usuário' : 'confirmado pelo usuário'; },
+  impSource: v => S.imp.sourceId = v,
+  colName: (v, el) => { const im = S.imp, t = T(), col = +el.dataset.col, c = im.sug.cols[col], before = dispName(t, c, im.names, im.mapping); im.names[col] = String(v).replace(/\s+/g, ' ').trim().slice(0, 60); const after = dispName(t, c, im.names, im.mapping); if (isNewField(t, im.mapping[col]) && im.mapping[col] === CX.customKey(before)) im.mapping[col] = CX.customKey(after); }, map: (v, el) => { S.imp.mapping[el.dataset.col] = v || null; const c = S.imp.sug.cols[+el.dataset.col]; c.ambiguous = false; c.basis = isNewField(T(), v) ? 'campo novo criado pelo usuário' : 'confirmado pelo usuário'; },
   sort: v => S.sort = v, segPurpose: v => S.seg.purpose = v, segOp: v => S.seg.op = v,
   stagePick: v => { if (v) setStage(v); return false; },
   connType: v => { S.connType = v; }, cmap: (v, el) => { if (S.connTest) S.connTest.mapping[el.dataset.h] = v || null; return !CX.isCustom(v) ? false : undefined; },
@@ -633,15 +634,24 @@ function maskSample(v) {
 function columnsSummary(headers, rows, sug) {
   return headers.map((h, i) => { const vals = rows.slice(0, 500).map(r => r[i]).filter(v => v !== '' && v != null); const uniq = Array.from(new Set(vals.map(String))); const c = sug.cols[i] || {}; return { index: i, header: h, samples: uniq.slice(0, 5).map(maskSample), fill: rows.length ? Math.round(vals.length / Math.min(500, rows.length) * 100) : 0, distinct: uniq.length, guess: c.field || null, guess_conf: c.confidence || 0 }; });
 }
+const isGeneric = h => /^coluna_\d+$/.test(String(h || '').trim());
+// nome exibido da coluna: digitado pela pessoa > (cabeçalho genérico: sugerido pela IA > campo reconhecido) > cabeçalho original
+function dispName(t, c, names, mapping) {
+  if (names && names[c.col] != null && String(names[c.col]).trim()) return String(names[c.col]).trim();
+  if (!isGeneric(c.header)) return c.header;
+  if (c.aiName && !isGeneric(c.aiName)) return c.aiName;
+  const f = mapping && mapping[c.col]; if (f && !isNewField(t, f)) return CX.fieldLabel(t, f);
+  return c.header;
+}
 function fieldOptions(t, cur, header) {
   const cf = t.customFields || [], nk = CX.customKey(header), exists = cf.some(c => c.k === nk), o = (v, l) => `<option value="${esc(v)}" ${cur === v ? 'selected' : ''}>${esc(l)}</option>`;
   return `<option value="">Não importar</option><optgroup label="Campos canônicos">${CX.FIELDS.map(f => o(f.k, f.label)).join('')}</optgroup>${cf.length ? `<optgroup label="Campos personalizados">${cf.map(c => o(c.k, c.label)).join('')}</optgroup>` : ''}${exists ? '' : `<optgroup label="Campo novo">${o(nk, '+ Criar campo "' + String(header).slice(0, 40) + '"')}</optgroup>`}`;
 }
 const isNewField = (t, k) => CX.isCustom(k) && !CX.customField(t, k);
 function applyAI(ai, cols, mapping, key) {
-  ai.columns.forEach(a => { const c = cols.find(x => x.col === a.index); if (!c) return;
+  ai.columns.forEach(a => { const c = cols.find(x => x.col === a.index); if (!c) return; if (a.suggested_name) c.aiName = String(a.suggested_name).trim().slice(0, 60);
     if (a.sensitive) { mapping[key(c)] = null; c.sensitive = true; c.basis = 'CONNEXT IA marcou como dado sensível: não importado'; return; }
-    if (a.field === 'novo_campo') { if (!mapping[key(c)] && a.confidence >= 0.6) { mapping[key(c)] = CX.customKey(c.header); c.field = mapping[key(c)]; c.confidence = a.confidence; c.basis = 'CONNEXT IA sugeriu criar um campo novo'; c.ambiguous = true; } return; }
+    if (a.field === 'novo_campo') { if (!mapping[key(c)] && a.confidence >= 0.6) { mapping[key(c)] = CX.customKey(isGeneric(c.header) && c.aiName ? c.aiName : c.header); c.field = mapping[key(c)]; c.confidence = a.confidence; c.basis = 'CONNEXT IA sugeriu criar um campo novo'; c.ambiguous = true; } return; }
     if (a.field !== 'none' && a.confidence >= 0.6 && (!mapping[key(c)] || (c.confidence || 0) < 0.7)) { mapping[key(c)] = a.field; c.field = a.field; c.confidence = a.confidence; c.basis = 'sugerido pela CONNEXT IA'; c.ambiguous = a.confidence < 0.75; } });
 }
 async function analyzeImport() {
