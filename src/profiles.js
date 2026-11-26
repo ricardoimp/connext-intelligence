@@ -62,13 +62,16 @@ async function orgProfiles(env, ctx, tid) {
 // processa um lote de registros da fila
 async function processBatch(env, ctx, tid, queueRows) {
   const qIds = queueRows.map(q => q.record_id), ops = {}; queueRows.forEach(q => { if (q.op && q.op.startsWith('enrich:')) ops[q.record_id] = q.op.slice(7).split(','); });
+  ctx.step = 'lote';
   const base = (await inQuery(env, 'SELECT ' + REC_COLS + ' FROM source_records WHERE tenant_id = ? AND id IN', tid, qIds)).map(recOf);
   const have = new Map(base.map(r => [r.id, r]));
   // índices de chaves fortes e de nomes dos registros do lote (todos os registros entram no índice antes de qualquer cálculo)
+  ctx.step = 'indice';
   await indexRecords(env, tid, base);
   // componente completo: registros ligados direta ou indiretamente por chave forte não ignorada,
   // mais todos os registros dos perfis envolvidos, até não sobrar ligação nova. Com o componente inteiro
   // e a mesma contagem de blocos do cálculo completo, o resultado é idêntico ao recálculo de todo o tenant.
+  ctx.step = 'componente';
   const bigKeys = new Set(), keyDone = new Set(), entDone = new Set(); let frontier = base.slice(), capped = false;
   while (frontier.length && !capped) {
     const ks = new Set(); frontier.forEach(r => CX.recordKeys(r).forEach(k => { if (!keyDone.has(k)) ks.add(k); }));
@@ -81,16 +84,19 @@ async function processBatch(env, ctx, tid, queueRows) {
     if (ids.length) (await inQuery(env, 'SELECT ' + REC_COLS + ' FROM source_records WHERE tenant_id = ? AND id IN', tid, ids)).forEach(x => { if (!have.has(x.id)) { const r = recOf(x); have.set(r.id, r); next.push(r); } });
     const ents = Array.from(new Set(frontier.concat(next).map(r => r.entity_id).filter(e => e && !entDone.has(e)))); ents.forEach(e => entDone.add(e));
     if (ents.length) (await inQuery(env, 'SELECT ' + REC_COLS + ' FROM source_records WHERE tenant_id = ? AND entity_id IN', tid, ents)).forEach(x => { if (!have.has(x.id)) { const r = recOf(x); have.set(r.id, r); next.push(r); } });
-    frontier = next; if (have.size > CAP) capped = true;
+    frontier = next; ctx.have = have.size; if (have.size > CAP) capped = true;
   }
   if (capped) console.error('perfis: componente acima de ' + CAP + ' registros no tenant ' + tid + '; lote ' + qIds[0]);
   const records = Array.from(have.values()).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const rids = records.map(r => r.id);
+  ctx.step = 'enriquecimentos';
   const enr = (await inQuery(env, 'SELECT * FROM enrichment_results WHERE tenant_id = ? AND record_id IN', tid, rids)).map(e => ({ id: e.id, record_id: e.record_id, field: e.field, value: e.value, provider: e.provider, run: e.run_id, at: e.at, method: e.method, verification: e.verification, note: e.note, confidence: e.confidence, synthetic: !!e.synthetic, cost: e.cost }));
   const oldEnts = Array.from(new Set(records.map(r => r.entity_id).filter(Boolean)));
   const stg = oldEnts.length ? await inQuery(env, 'SELECT * FROM lead_stages WHERE tenant_id = ? AND entity_id IN', tid, oldEnts) : [];
   const t = miniTenant(ctx, records, enr, stg);
+  ctx.step = 'organizacoes';
   t.bigKeys = bigKeys; t.orgProfiles = await orgProfiles(env, ctx, tid);
+  ctx.step = 'calculo';
   CX.rebuild(t);
   // enriquecimento pedido para registros do lote
   // perfis agrupados pelo mesmo pedido de provedores: uma execução por pedido, como no enriquecimento manual
@@ -112,6 +118,7 @@ async function processBatch(env, ctx, tid, queueRows) {
   if (t.spendDelta) stmts.push(env.DB.prepare('UPDATE tenants SET spend = spend + ? WHERE id = ?').bind(t.spendDelta, tid));
   newEnrich.forEach(e => stmts.push(env.DB.prepare('INSERT OR IGNORE INTO enrichment_results (tenant_id, id, record_id, field, value, provider, run_id, at, method, verification, note, confidence, synthetic, cost) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(tid, e.id, e.record_id, e.field, String(e.value), e.provider, e.run || null, e.at, e.method || null, e.verification || null, e.note || null, e.confidence || null, e.synthetic ? 1 : 0, e.cost || 0)));
   // perfis atuais
+  ctx.step = 'assinaturas';
   const prevSig = {}; if (d.profiles.length) (await inQuery(env, 'SELECT id, sig FROM canonical_entities WHERE tenant_id = ? AND id IN', tid, d.profiles.map(p => p.id))).forEach(x => prevSig[x.id] = x.sig);
   const newIds = new Set();
   for (const p of d.profiles) {
@@ -141,6 +148,7 @@ async function processBatch(env, ctx, tid, queueRows) {
   (d.keyCands || []).forEach(c => { const ea = d.recToEnt[c.a], eb = d.recToEnt[c.b]; stmts.push(env.DB.prepare("INSERT INTO identity_match_candidates (tenant_id, pair_key, score, reasons_json, status, updated_at, ent_a, ent_b, kind) VALUES (?,?,?,?,'pendente',?,?,?,'chave') ON CONFLICT (tenant_id, pair_key) DO UPDATE SET score = excluded.score, reasons_json = excluded.reasons_json, updated_at = excluded.updated_at, ent_a = excluded.ent_a, ent_b = excluded.ent_b, kind = 'chave'").bind(tid, c.key, c.score, JSON.stringify(c.reasons), at, ea < eb ? ea : eb, ea < eb ? eb : ea)); });
   if (newIds.size || oldEnts.length) stmts.push(env.DB.prepare('INSERT INTO tenant_stats (tenant_id, dirty, cands_dirty, at) VALUES (?, 1, 1, ?) ON CONFLICT (tenant_id) DO UPDATE SET dirty = 1, cands_dirty = 1').bind(tid, at));
   qIds.forEach(id => stmts.push(env.DB.prepare('DELETE FROM profile_queue WHERE tenant_id = ? AND record_id = ?').bind(tid, id)));
+  ctx.step = 'gravacao';
   for (const c of chunks(stmts, 500)) await env.DB.batch(c);
   return { records: qIds.length, touched: d.profiles.length, removed: oldEnts.filter(x => !newIds.has(x)).length };
 }
@@ -173,7 +181,8 @@ export async function processQueue(env, tid, budgetMs, withCands) {
     while (!pendingIdx && now() - t0 < budgetMs) {
       const rows = (await env.DB.prepare('SELECT record_id, op FROM profile_queue WHERE tenant_id = ? ORDER BY record_id LIMIT 400').bind(tid).all()).results;
       if (!rows.length) break;
-      const r = await processBatch(env, ctx, tid, rows); done += r.records; touched += r.touched; batches++;
+      let r; try { r = await processBatch(env, ctx, tid, rows); } catch (e) { e.message = 'lote de ' + rows.length + ' a partir de ' + rows[0].record_id + ', passo ' + ctx.step + ' (' + (ctx.have || 0) + ' registros carregados): ' + e.message; throw e; }
+      done += r.records; touched += r.touched; batches++;
     }
     if (done) await env.DB.prepare('INSERT INTO tenant_stats (tenant_id, dirty, at) VALUES (?, 1, ?) ON CONFLICT (tenant_id) DO UPDATE SET dirty = 1').bind(tid, now()).run();
     const left = await env.DB.prepare('SELECT COUNT(*) AS n FROM profile_queue WHERE tenant_id = ?').bind(tid).first();
