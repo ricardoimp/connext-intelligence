@@ -48,6 +48,49 @@ const LEVELS = [
 ];
 const levelTip = i => 'Nível L' + i + '|' + LEVELS[i];
 const lvl = n => `<span class="lvl l${n}" data-tip="${esc(levelTip(n))}">L${n}</span>`;
+/* ---------- glossário: todo indicador da plataforma se explica ao passar o mouse ---------- */
+// textos alinhados às regras do motor (engine.js): pesos de completude, DQI, qualificação, contactabilidade e níveis
+const GLOSSARY = [
+  [['dqi', 'qualidade média (dqi)', 'índice de qualidade', 'qualidade'], 'DQI · Índice de qualidade do dado', 'Nota de 0 a 100 do perfil. Média ponderada de cinco medidas: completude 30%, validade 25%, confiança 20%, atualidade 15% e rastreabilidade 10%. Os pesos podem ser mudados em Scoring Studio.'],
+  [['completeness', 'completude'], 'Completeness · Completude', 'Quanto dos campos importantes está preenchido com valor válido, de 0 a 100. Cada campo tem peso. Pessoa: nome 18, e-mail 18, telefone 14, organização 10, cargo 10, cidade 6, UF 6, CPF 6, segmento 5, consentimento 4, CEP 3. Organização: nome 24, CNPJ 20, site, segmento, telefone e e-mail 10 cada, cidade 6, UF 5, CEP 5.'],
+  [['validity', 'validade'], 'Validity · Validade', 'Porcentagem dos valores recebidos que passaram na validação (e-mail com formato e domínio válidos, telefone com DDD e número possíveis, CPF e CNPJ com dígito verificador correto, datas reais).'],
+  [['confidence', 'confiança'], 'Confidence · Confiança', 'Quanto dá para confiar nos valores escolhidos para o perfil, de 0 a 100. Sobe com a confiabilidade da fonte e quando mais de uma fonte informa o mesmo valor; cai quando há só uma evidência.'],
+  [['freshness', 'atualidade'], 'Freshness · Atualidade', 'Quão recentes são os dados, de 0 a 100. Cada campo tem validade própria (telefone e cargo envelhecem mais rápido que nome ou CPF). Valor perto de 0 indica dados antigos que precisam ser confirmados.'],
+  [['traceability', 'rastreabilidade'], 'Traceability · Rastreabilidade', 'Porcentagem dos dados que vieram de fontes com origem, proprietário, base legal e contrato registrados em Data Sources.'],
+  [['qualification', 'qualificação'], 'Qualification · Qualificação (ICP)', 'Aderência ao perfil de cliente ideal, de 0 a 100. Pessoa: segmento do ICP 35, UF do ICP 20, cargo do ICP 25, e-mail corporativo 20. Organização: segmento 35, UF 20, CNPJ 25, site 20. O ICP é configurado em Scoring Studio.'],
+  [['contactability', 'contactabilidade'], 'Contactability · Contactabilidade', 'Se dá para contatar a pessoa de forma legítima: 50 pontos por e-mail e 50 por telefone válidos, contados só quando o contato é permitido (base legal e finalidade da fonte, consentimento quando exigido e fora da lista de supressão).'],
+  [['registros recebidos', 'registros'], 'Registros recebidos', 'Linhas que entraram na base depois de mapeadas e normalizadas, somando todas as importações e conexões. Um mesmo titular pode ter vários registros.'],
+  [['entidades únicas', 'perfis', 'perfis únicos'], 'Entidades únicas', 'Pessoas e organizações distintas depois da resolução de identidade: registros com o mesmo CPF, CNPJ, e-mail ou telefone (e nome compatível) viram um único perfil mestre.'],
+  [['duplicatas consolidadas', 'duplicatas'], 'Duplicatas consolidadas', 'Registros que foram unidos a outro registro do mesmo titular. "Em revisão" são pares parecidos que precisam de decisão humana em Identity Resolution.'],
+  [['perfis enriquecidos'], 'Perfis enriquecidos', 'Perfis que receberam ao menos um dado de enriquecimento (por exemplo DDD e UF pelo telefone, site pelo domínio do e-mail).'],
+  [['custo por registro'], 'Custo por registro', 'Gasto com provedores de enriquecimento dividido pelos registros. Não inclui a CONNEXT IA, que aparece em Monitoring.'],
+  [['linhas brutas', 'linhas brutas recebidas'], 'Linhas brutas', 'Total de linhas do arquivo ou recebidas da conexão, antes de qualquer tratamento.'],
+  [['registros líquidos'], 'Registros líquidos', 'Registros que foram de fato gravados: linhas brutas menos as descartadas (sem nenhum campo válido) e, em arquivos de acesso, já consolidadas por pessoa.'],
+  [['aproveitamento', 'aproveitamento geral'], 'Aproveitamento', 'Registros líquidos divididos pelas linhas brutas. Em registros de acesso (Wi-Fi), porcentagem baixa é normal: cada pessoa aparece em muitas sessões.'],
+  [['perfis novos', 'perfis novos gerados'], 'Perfis novos', 'Perfis que nasceram nesta importação. Os demais registros enriqueceram perfis que já existiam.'],
+  [['nível', 'níveis', 'level'], 'Nível L0 a L5', LEVELS.map((d, i) => 'L' + i + ': ' + d).join(' ')],
+  [['etapa', 'etapa do funil', 'funil comercial'], 'Etapa do funil', 'Novo, Identificado, Enriquecido, MQL (lead qualificado pelo marketing), SQL (aceito por vendas), Em negociação, Cliente ou Descartado. Definida por regras e pela CONNEXT IA, e pode ser corrigida no Lead 360.'],
+  [['base legal'], 'Base legal', 'Hipótese da LGPD que autoriza o uso dos dados da fonte (consentimento, legítimo interesse, execução de contrato etc.).'],
+  [['finalidades', 'finalidade'], 'Finalidades', 'Para que os dados da fonte podem ser usados: análise, enriquecimento, contato de marketing, contato de vendas. Um uso fora da finalidade é bloqueado.'],
+  [['elegibilidade', 'elegível'], 'Elegibilidade', 'Se o perfil pode ser usado para cada finalidade, considerando base legal, finalidade da fonte, consentimento e supressão. É bloqueante, independe da nota.'],
+  [['supressão', 'registro de supressão'], 'Supressão', 'Lista de e-mails e telefones que pediram para não ser contatados. Contato bloqueado mesmo que outra fonte traga o dado de novo.'],
+  [['sessões na origem'], 'Sessões na origem', 'Quantas linhas do arquivo de acesso pertenciam a esta pessoa antes da consolidação.'],
+  [['tag de origem', 'origem dos dados'], 'Tag de origem', 'Marca gravada em cada registro com fonte, proprietário, importação, arquivo, quem enviou e quando.'],
+  [['confiança', 'confidence'], 'Confiança', 'Quanto dá para confiar neste valor, de 0 a 100, pela confiabilidade da fonte e pela concordância entre fontes.'],
+  [['sinal', 'sinais'], 'Sinal', 'Informação que indica o estágio comercial ou a qualidade do lead.']
+];
+const GLOSS = {}; GLOSSARY.forEach(([keys, title, text]) => keys.forEach(k => { if (!GLOSS[k]) GLOSS[k] = title + '|' + text; }));
+const glossKey = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').replace(/[:·*]+$/, '').trim();
+// qualquer conteúdo novo na tela (inclusive desenhado fora do render) recebe as explicações
+let glossT = null; new MutationObserver(() => { clearTimeout(glossT); glossT = setTimeout(() => { try { autoGlossary(document.getElementById('main')); } catch (e) { /* auxiliar */ } }, 120); }).observe(document.documentElement, { childList: true, subtree: true });
+function autoGlossary(root) {
+  if (!root) return;
+  root.querySelectorAll('.kpi h3, .hd h3, th, svg text, .gloss').forEach(el => {
+    if (el.dataset.tip || (el.parentElement && el.parentElement.closest('[data-tip]'))) return;
+    const k = glossKey(el.textContent), v = GLOSS[k] || GLOSS[k.replace(/^\d+\s*/, '')]; if (!v) return;
+    el.setAttribute('data-tip', v); el.classList.add('gl');
+  });
+}
 const card = (cls, title, sub, body, extra) => `<section class="card ${cls}"><div class="hd"><h3>${title}</h3>${sub ? `<small>${sub}</small>` : ''}<span class="sp"></span>${extra || ''}</div>${body}</section>`;
 const tbl = (heads, rows, cls) => `<div class="tw"><table class="${cls || ''}"><thead><tr>${heads.map(h => h.startsWith('n:') ? `<th class="n">${h.slice(2)}</th>` : `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${heads.length}" class="muted">Sem dados para os filtros atuais.</td></tr>`}</tbody></table></div>`;
 const meter = (v, color) => `<div class="meter" title="${v}"><b style="width:${Math.max(0, Math.min(100, v))}%;${color ? 'background:' + color : ''}"></b></div>`;
@@ -369,6 +412,7 @@ V.workflows = () => {
 V.catalog = () => {
   const t = T(), fs = t.derived ? t.derived.fieldStats : {}, st = srcStats(t), n = t.derived ? t.derived.profiles.length : 0;
   return `<div class="grid">
+  ${card('c12', 'Glossário', 'o que significa cada indicador e termo da plataforma · os mesmos textos aparecem ao passar o mouse', `<div class="gloss-grid">${GLOSSARY.map(([, title, text]) => `<div class="gloss-item"><b>${esc(title)}</b><p>${esc(text)}</p></div>`).join('')}</div>`)}
   ${card('c12', 'Esquema canônico', 'pessoas, organizações e relações comerciais', tbl(['Campo', 'Chave', 'Categoria', 'Classe de sensibilidade', 'n:Validade (dias)', 'n:Perfis preenchidos', 'Fontes que informam'], CX.FIELDS.map(f => `<tr><td><b>${f.label}</b></td><td class="mono">${f.k}</td><td>${f.cat}</td><td>${chip(f.sens, f.sens.includes('restrito') ? 'crit' : f.sens === 'pessoal' ? 'warn' : 'plain')}</td><td class="n">${f.ttl || 'sem prazo'}</td><td class="n">${fs[f.k] ? fmt(fs[f.k].filled) + ' (' + pct(fs[f.k].filled, n) + '%)' : 0}</td><td>${t.sources.filter(s => st[s.id] && st[s.id].fields[f.k]).map(s => chip(s.name, 'plain')).join(' ')}</td></tr>`)))}
   ${card('c12', 'Campos personalizados', 'criados a partir de colunas sem campo canônico equivalente', (t.customFields || []).length ? tbl(['Campo', 'Chave', 'Tipo', 'Coluna de origem', 'Criado por', 'Criado em', 'Primeira fonte', 'Importação', 'n:Perfis preenchidos'], (t.customFields || []).map(c => `<tr><td><b>${esc(c.label)}</b></td><td class="mono">${esc(c.k)}</td><td>${chip(c.type, 'plain')}</td><td>${esc(c.origin_column || c.label)}</td><td>${esc(c.created_by || '')}</td><td>${dt(c.created_at)}</td><td>${esc(srcName(c.source_id))}</td><td class="mono">${esc(c.import_id || '')}</td><td class="n">${t.derived ? fmt(t.derived.profiles.filter(p => p.extra && p.extra[c.k]).length) : 0}</td></tr>`)) : '<p class="muted">Nenhum campo personalizado ainda. No Import Center, escolha "+ Criar campo" no mapeamento de uma coluna sem campo canônico.</p>')}
   ${card('c7', 'Linhagem', 'coluna do arquivo → campo canônico, por importação', tbl(['Importação', 'Arquivo', 'Mapeamento aplicado'], t.imports.map(i => { const m = Object.values(t.mappings).find(x => x.fileName === i.fileName); return `<tr><td class="mono">${i.id}</td><td>${esc(i.fileName)}<br><span class="muted">${esc(srcName(i.sourceId))}</span></td><td>${m ? Object.entries(m.map).filter(e => e[1]).map(e => `<code>${esc(e[0])}</code> → ${esc(CX.isOriginField(e[1]) ? (CX.ORIGIN_FIELDS.find(o => o[0] === e[1]) || [])[1] : CX.fieldLabel(t, e[1]))}${CX.isCustom(e[1]) ? ' ' + chip('personalizado', 'plain') : ''}`).join('<br>') : '<span class="muted">n/d</span>'}</td></tr>`; })))}
@@ -435,6 +479,7 @@ function renderTop() {
 function render() {
   renderNav(); renderTop(); const m = $('#main'), y = m.scrollTop;
   try { m.innerHTML = V[S.view](); } catch (e) { m.innerHTML = `<div class="card note crit">Não foi possível montar esta tela: ${esc(e.message)}. Recarregue a página; se persistir, restaure os dados em Administration.</div>`; console.error(e); reportError('tela ' + S.view + ': ' + e.message, e.stack); }
+  try { autoGlossary(m); } catch (e) { /* glossário é auxiliar */ }
   if (S.view === 'explorer') initExplorer(); m.scrollTop = S._keep ? y : 0; S._keep = false;
   scheduleSync();
 }
