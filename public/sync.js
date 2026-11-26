@@ -21,21 +21,23 @@ async function call(method, path, body, raw) {
 }
 
 /* ---------- linhas por tabela, a partir do estado do motor ---------- */
-const MUTABLE = { data_sources: 1, import_jobs: 1, mapping_templates: 1, identity_decisions: 1, identity_match_candidates: 1, canonical_entities: 1, scoring_models: 1, enrichment_requests: 1, workflow_executions: 1, segments: 1, suppression_registry: 1 };
-const ORDER = ['data_sources', 'import_jobs', 'source_records', 'mapping_templates', 'identity_decisions', 'enrichment_results', 'enrichment_requests', 'enrichment_cache', 'suppression_registry', 'erasure_requests', 'segments', 'scoring_models', 'data_quality_assessments', 'workflow_executions', 'identity_match_candidates', 'canonical_entities', 'golden_profile_versions', 'audit_events'];
-const PK = { identity_decisions: r => r.kind + '|' + r.pair_key, golden_profile_versions: r => r.entity_id + '|' + r.sig, mapping_templates: r => r.sig, scoring_models: r => String(r.version), enrichment_cache: r => r.cache_key, suppression_registry: r => r.key_hash, identity_match_candidates: r => r.pair_key };
+const MUTABLE = { custom_fields: 1, data_sources: 1, import_jobs: 1, mapping_templates: 1, identity_decisions: 1, identity_match_candidates: 1, canonical_entities: 1, scoring_models: 1, enrichment_requests: 1, workflow_executions: 1, segments: 1, suppression_registry: 1 };
+const ORDER = ['data_sources', 'import_jobs', 'custom_fields', 'source_records', 'mapping_templates', 'identity_decisions', 'enrichment_results', 'enrichment_requests', 'enrichment_cache', 'suppression_registry', 'erasure_requests', 'segments', 'scoring_models', 'data_quality_assessments', 'workflow_executions', 'identity_match_candidates', 'canonical_entities', 'golden_profile_versions', 'audit_events'];
+const PK = { custom_fields: r => r.field_key, identity_decisions: r => r.kind + '|' + r.pair_key, golden_profile_versions: r => r.entity_id + '|' + r.sig, mapping_templates: r => r.sig, scoring_models: r => String(r.version), enrichment_cache: r => r.cache_key, suppression_registry: r => r.key_hash, identity_match_candidates: r => r.pair_key };
 const keyOf = (tb, r) => PK[tb] ? PK[tb](r) : r.id;
 const delKey = (tb, k) => tb === 'identity_decisions' ? [k.slice(k.indexOf('|') + 1), k.slice(0, k.indexOf('|'))] : tb === 'golden_profile_versions' ? k.split('|') : tb === 'scoring_models' ? +k : k;
 
 function golden(p) {
   const g = {};
   for (const k in p.fields) { const f = p.fields[k]; g[k] = { value: f.value, source_id: f.source_id, observed_at: f.observed_at, method: f.method, verification: f.verification, confidence: f.confidence, justification: f.justification, conflict: !!f.conflict, stale: !!f.stale, synthetic: !!f.synthetic, permitted: f.permitted || [] }; }
+  for (const k in p.extra || {}) { const x = p.extra[k]; g[k] = { value: x.value, source_id: x.source_id, observed_at: x.observed_at, method: 'Campo personalizado', custom: true, values: x.values }; }
   return g;
 }
 function tables(t, prev) {
   const T = {};
   T.data_sources = t.sources.map(s => ({ id: s.id, name: s.name || s.id, type: s.type, origin: s.origin, owner: s.owner, legal_basis: s.legal_basis, purposes_json: s.purposes || [], reliability: s.reliability, contract: s.contract, created_at: s.created_at, updated_at: s.updated_at || s.created_at }));
   T.import_jobs = t.imports.filter(i => i.status !== 'processando').map(i => ({ id: i.id, source_id: i.sourceId, file_name: i.fileName, file_hash: i.fileHash, format: i.format, encoding: i.encoding, bytes: i.bytes, version: i.version, status: i.status, total: i.total, received: i.st.received, normalized: i.st.normalized, validated: i.st.validated, row_errors: i.rowErrors.length + i.parseErrors.length, raw_key: i.raw_key || null, actor: i.actor, at: i.at, data_json: { mapping: i.mapping, st: i.st, ms: i.ms, parseErrors: i.parseErrors.slice(0, 200), rowErrors: i.rowErrors.slice(0, 200), cursor: i.cursor } }));
+  T.custom_fields = (t.customFields || []).map(c => ({ field_key: c.k, label: c.label, data_type: c.type, origin_column: c.origin_column || c.label, source_id: c.source_id, import_id: c.import_id, created_by: c.created_by, created_at: c.created_at }));
   T.source_records = t.records.map(r => ({ id: r.id, source_id: r.source_id, import_id: r.import_id, row_num: r.row, entity_type: r.type, observed_at: r.observed_at, payload_json: { f: r.f, flags: r.flags, origin: r.origin || null } }));
   T.mapping_templates = Object.keys(t.mappings).map(sig => { const m = t.mappings[sig]; return { sig, file_name: m.fileName, map_json: m.map, used: m.used, at: m.at }; });
   T.identity_decisions = [];
@@ -150,6 +152,7 @@ async function loadTenant(id, role, onProgress) {
   d.supp.forEach(s => { t.suppression[s.key_hash] = { type: s.channel, at: s.at, reason: s.reason }; });
   t.erased = d.erased.map(e => ({ id: e.id, ref: e.ref_hash, records: e.records, at: e.at, actor: e.actor }));
   t.audit = d.audit.map(a => ({ id: a.id, at: a.at, actor: a.actor, action: a.action, detail: a.detail, ref: a.ref }));
+  t.customFields = (d.customFields || []).map(c => ({ k: c.field_key, label: c.label, type: c.data_type, origin_column: c.origin_column, source_id: c.source_id, import_id: c.import_id, created_by: c.created_by, created_at: c.created_at }));
   (d.stages || []).forEach(x => { t.stages[x.entity_id] = { stage: x.stage, method: x.method, confidence: x.confidence, reason: x.reason, sig: x.sig, model: x.model, actor: x.actor, at: x.at }; });
   let after = '', got = 0;
   while (true) {

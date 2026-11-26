@@ -52,6 +52,7 @@ const can = (role, action) => (PERMS[role] || []).includes(action);
 const TABLES = {
   data_sources: { cols: ['id', 'name', 'type', 'origin', 'owner', 'legal_basis', 'purposes_json', 'reliability', 'contract', 'created_at', 'updated_at'], pk: ['id'], need: 'import' },
   import_jobs: { cols: ['id', 'source_id', 'file_name', 'file_hash', 'format', 'encoding', 'bytes', 'version', 'status', 'total', 'received', 'normalized', 'validated', 'row_errors', 'actor', 'at', 'data_json'], pk: ['id'], need: 'import', registered: true },
+  custom_fields: { cols: ['field_key', 'label', 'data_type', 'origin_column', 'source_id', 'import_id', 'created_by', 'created_at'], pk: ['field_key'], need: 'import' },
   source_records: { cols: ['id', 'source_id', 'import_id', 'row_num', 'entity_type', 'observed_at', 'payload_json', 'created_at'], pk: ['id'], need: 'import' },
   mapping_templates: { cols: ['sig', 'file_name', 'map_json', 'used', 'at'], pk: ['sig'], need: 'import' },
   identity_decisions: { cols: ['pair_key', 'kind', 'actor', 'at'], pk: ['pair_key', 'kind'], need: 'merge' },
@@ -141,7 +142,8 @@ async function load(env, tid) {
   ]);
   const entities = await env.DB.prepare('SELECT id, sig FROM canonical_entities WHERE tenant_id = ?').bind(tid).all().then(r => r.results);
   const stages = await env.DB.prepare('SELECT entity_id, stage, method, confidence, reason, sig, model, actor, at FROM lead_stages WHERE tenant_id = ?').bind(tid).all().then(r => r.results);
-  return { ok: true, stages, tenant, sources, imports, decisions, candidates, mappings, snapshots, models, runs, results, cache, execs, segs, supp, erased, audit: auditRows, entities, records: count.n };
+  const customFields = await env.DB.prepare('SELECT * FROM custom_fields WHERE tenant_id = ? ORDER BY created_at').bind(tid).all().then(r => r.results);
+  return { ok: true, stages, customFields, tenant, sources, imports, decisions, candidates, mappings, snapshots, models, runs, results, cache, execs, segs, supp, erased, audit: auditRows, entities, records: count.n };
 }
 
 /* ---------- sincronização ---------- */
@@ -405,7 +407,7 @@ export default {
             }
             if (action === 'sync' && req.method === 'POST') return json(Object.assign({ ok: true }, await runConnector(env, tid, c, user.email)));
             if (action === 'mapping' && req.method === 'POST') {
-              const b = await req.json(); const m = {}; Object.entries(b.mapping || {}).forEach(([h, f]) => { m[String(h).slice(0, 120)] = f && globalThis.CX.F[f] ? f : null; });
+              const b = await req.json(); const m = {}; Object.entries(b.mapping || {}).forEach(([h, f]) => { m[String(h).slice(0, 120)] = f && (globalThis.CX.F[f] || /^x_[a-z0-9]{1,40}$/.test(f)) ? f : null; });
               await env.DB.prepare('UPDATE connectors SET mapping_json = ? WHERE tenant_id = ? AND id = ?').bind(JSON.stringify(m), tid, cid).run();
               await audit(env, tid, user.email, 'conector_mapeamento', c.name, c.id);
               return json({ ok: true });

@@ -49,10 +49,11 @@ const SYSTEM_BASE = 'Você é o engenheiro de dados da plataforma Connext Intell
 
 /* ---------- leitura de arquivo ou conexão ---------- */
 export async function analyzeSource(env, tid, actor, body) {
-  const fields = CX.FIELDS.map(f => f.k);
+  const custom = (body.custom_fields || []).filter(c => c && /^x_[a-z0-9]{1,40}$/.test(c.k)).slice(0, 60);
+  const fields = CX.FIELDS.map(f => f.k).concat(custom.map(c => c.k));
   const cols = (body.columns || []).slice(0, 80).map(c => ({ indice: c.index, coluna: String(c.header).slice(0, 80), preenchimento: c.fill, distintos: c.distinct, amostras_mascaradas: (c.samples || []).slice(0, 5).map(s => String(s).slice(0, 80)), sugestao_por_regra: c.guess || null, confianca_regra: c.guess_conf || 0 }));
   const user = 'Analise a estrutura desta base de dados que será importada como leads ou organizações. As amostras foram mascaradas para proteger dados pessoais: preserve o formato, não o conteúdo.\n\n' +
-    'Campos canônicos disponíveis: ' + CX.FIELDS.map(f => f.k + ' (' + f.label + ')').join(', ') + ', e none quando a coluna não deve ser importada.\n' +
+    'Campos canônicos disponíveis: ' + CX.FIELDS.map(f => f.k + ' (' + f.label + ')').join(', ') + (custom.length ? '. Campos personalizados já criados neste tenant: ' + custom.map(c => c.k + ' (' + String(c.label).slice(0, 60) + ')').join(', ') : '') + ', novo_campo quando a coluna traz informação útil sem campo equivalente (por exemplo identificador de dispositivo como MAC, ID em outro sistema, código interno, preferência declarada), e none quando a coluna não deve ser importada (vazia, ruído técnico sem uso comercial ou dado sensível).\n' +
     'lead_status recebe colunas de status, etapa ou fase comercial; notes recebe observações em texto livre; last_interaction recebe a data do último contato.\n\n' +
     'Fontes já cadastradas (id, nome, origem, base legal): ' + JSON.stringify((body.sources || []).slice(0, 30)) + '. Fonte escolhida pela pessoa: ' + JSON.stringify(body.chosen_source || null) + '.\n\n' +
     '<dados>\n' + JSON.stringify({ arquivo: String(body.name || '').slice(0, 120), origem: body.origin || 'arquivo', linhas: body.rows, colunas: cols }) + '\n</dados>\n\n' +
@@ -65,7 +66,7 @@ export async function analyzeSource(env, tid, actor, body) {
       file_kind: { type: 'string', enum: ['lista_de_leads', 'exportacao_crm', 'lista_de_empresas', 'formulario_ou_captura', 'eventos_ou_presenca', 'clientes_ou_vendas', 'outro'] },
       entity_type: { type: 'string', enum: ['person', 'organization', 'misto'] },
       summary: { type: 'string' },
-      columns: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { index: { type: 'integer' }, field: { type: 'string', enum: fields.concat(['none']) }, confidence: { type: 'number' }, reason: { type: 'string' }, sensitive: { type: 'boolean' }, funnel_signal: { type: 'boolean' } }, required: ['index', 'field', 'confidence', 'reason', 'sensitive', 'funnel_signal'] } },
+      columns: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { index: { type: 'integer' }, field: { type: 'string', enum: fields.concat(['novo_campo', 'none']) }, confidence: { type: 'number' }, reason: { type: 'string' }, sensitive: { type: 'boolean' }, funnel_signal: { type: 'boolean' } }, required: ['index', 'field', 'confidence', 'reason', 'sensitive', 'funnel_signal'] } },
       quality_issues: { type: 'array', items: { type: 'string' } },
       funnel_notes: { type: 'string' },
       suggested_source_name: { type: 'string' },

@@ -40,6 +40,27 @@ CX.FIELDS = [
   { k: 'created_at', label: 'Data de captura', cat: 'Metadado', sens: 'baixo', ttl: 0, syn: ['data', 'datacadastro', 'createdat', 'criadoem', 'datacaptura', 'timestamp', 'dtcadastro'] }
 ];
 CX.F = {}; CX.FIELDS.forEach(f => CX.F[f.k] = f);
+/* ---------- campos personalizados (criados na importação, prefixo x_) ---------- */
+CX.isCustom = k => typeof k === 'string' && k.slice(0, 2) === 'x_';
+CX.customKey = label => 'x_' + ((compact(label || '').replace(/[^a-z0-9]/g, '')) || 'campo').slice(0, 40);
+CX.customField = (t, k) => ((t && t.customFields) || []).find(c => c.k === k) || null;
+CX.fieldLabel = (t, k) => CX.F[k] ? CX.F[k].label : (CX.customField(t, k) || {}).label || String(k || '').replace(/^x_/, '');
+CX.inferType = function (vals) {
+  const v = (vals || []).map(x => String(x).trim()).filter(Boolean).slice(0, 200); if (!v.length) return 'texto';
+  const share = re => v.filter(x => re.test(x)).length / v.length;
+  if (share(/^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i) >= 0.8) return 'identificador de dispositivo';
+  if (share(/^(\d{1,3}\.){3}\d{1,3}$/) >= 0.8) return 'endereço IP';
+  if (share(/^\d{1,2}\/\d{1,2}\/\d{2,4}([ T]\d{1,2}:\d{2}(:\d{2})?)?$|^\d{4}-\d{2}-\d{2}/) >= 0.8) return 'data';
+  if (share(/^-?[\d.]+(,\d+)?\s*[a-z%]{0,3}$/i) >= 0.8) return 'número';
+  if (share(/^(sim|nao|não|s|n|true|false|0|1|yes|no)$/i) >= 0.8) return 'sim/não';
+  return 'texto';
+};
+CX.addCustomField = function (t, label, actor, ctx) {
+  t.customFields = t.customFields || []; label = String(label || '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Campo';
+  const k = (ctx && ctx.k) || CX.customKey(label), ex = CX.customField(t, k); if (ex) return ex;
+  const cf = { k, label, type: (ctx && ctx.type) || CX.inferType(ctx && ctx.samples), created_at: CX.now(), created_by: actor || 'sistema', source_id: (ctx && ctx.source_id) || null, import_id: (ctx && ctx.import_id) || null, origin_column: (ctx && ctx.column) || label };
+  t.customFields.push(cf); CX.audit(t, actor || 'sistema', 'campo_criado', cf.label + ' (' + k + ', ' + cf.type + ')', cf.import_id); return cf;
+};
 CX.PURPOSES = { analytics: 'Análise interna', enrichment: 'Enriquecimento', marketing_contact: 'Contato de marketing', sales_contact: 'Contato comercial' };
 CX.LEGAL = { consentimento: 'Consentimento', legitimo_interesse: 'Legítimo interesse', execucao_contrato: 'Execução de contrato', obrigacao_legal: 'Obrigação legal' };
 const W = {
@@ -129,13 +150,15 @@ function parseDate(v) {
   return NaN;
 }
 function nDate(v) { const t = parseDate(v); if (isNaN(t) || t > CX.now() + DAY || t < Date.UTC(1900, 0, 1)) return R(String(v).trim(), false, 'invalid', 'data inválida ou futura'); return R(new Date(t).toISOString().slice(0, 10), true, 'valid', ''); }
-function nSite(v) { const s = String(v).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, ''); return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s) ? R(s, true, 'valid', 'domínio com sintaxe válida') : R(s, false, 'invalid', 'domínio inválido'); }
+function nSite(v) { const s = String(v).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, ''); return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s) && /[a-z]/.test(s.slice(s.lastIndexOf('.') + 1)) ? R(s, true, 'valid', 'domínio com sintaxe válida') : R(s, false, 'invalid', 'domínio inválido'); }
 function nBool(v) { const s = norm(v); if (['sim', 's', 'yes', 'y', 'true', '1', 'optin', 'aceito'].includes(s)) return R('sim', true, 'valid', ''); if (['nao', 'n', 'no', 'false', '0', 'optout', 'recusado'].includes(s)) return R('não', true, 'valid', ''); return R(String(v).trim(), false, 'invalid', 'valor não booleano'); }
 function nText(v) { const s = String(v).replace(/\s+/g, ' ').trim(); if (INJECTION.test(s)) return R(s, false, 'invalid', 'conteúdo instrucional tratado como dado'); return TESTNAME.test(norm(s)) ? R(s, false, 'test', 'valor técnico') : R(s, true, 'valid', ''); }
 function nLong(v) { const s = String(v).replace(/\s+/g, ' ').trim().slice(0, 2000); if (!s) return R(s, false, 'invalid', 'vazio'); if (INJECTION.test(s)) return R(s, false, 'invalid', 'conteúdo instrucional tratado como dado'); return R(s, true, 'valid', ''); }
 function nStatus(v) { const s = String(v).replace(/\s+/g, ' ').trim().slice(0, 120); if (!s || TESTNAME.test(norm(s))) return R(s, false, 'invalid', 'status vazio ou técnico'); return R(s, true, 'valid', ''); }
 const NORMALIZERS = { full_name: nName, org_name: nOrg, email: nEmail, phone: nPhone, cpf: nCPF, cnpj: nCNPJ, cep: nCEP, state: nUF, birth_date: nDate, created_at: nDate, last_interaction: nDate, website: nSite, consent: nBool, notes: nLong, lead_status: nStatus };
 CX.normalize = (field, v) => (NORMALIZERS[field] || nText)(v);
+// campo personalizado: guarda o valor como veio (sem espaços extras); só conteúdo instrucional é isolado
+function nCustom(v) { const s = String(v).replace(/\s+/g, ' ').trim(); if (INJECTION.test(s)) return R(s, false, 'invalid', 'conteúdo instrucional tratado como dado'); return R(s, !!s, s ? 'valid' : 'invalid', ''); }
 CX.makeCPF = n => { const b = String(n).padStart(9, '0'); const d1 = cpfDV(b); return b + d1 + cpfDV(b + d1); };
 CX.makeCNPJ = n => { const b = String(n).padStart(8, '0') + '0001'; const d1 = cnpjDV(b); return b + d1 + cnpjDV(b + d1); };
 
@@ -314,7 +337,7 @@ CX.defaultConfig = () => ({
   workflows: { autoPipeline: true, reviewOnConflict: true, revalidateOnExpiry: true, internalEnrichOnImport: false, autoStageAI: false },
   ai: { enabled: true, monthlyBudgetUSD: 20 }
 });
-CX.newTenant = (id, name) => ({ id, name, salt: hash('salt:' + id), seq: 0, sources: [], imports: [], records: [], decisions: { merge: {}, reject: {}, split: {} }, suppression: {}, enrich: [], enrichRuns: [], cache: {}, audit: [], mappings: {}, snapshots: [], erased: [], segments: [], executions: [], modelVersions: [], stages: {}, config: CX.defaultConfig(), spend: 0, cacheHits: 0, derived: null });
+CX.newTenant = (id, name) => ({ id, name, salt: hash('salt:' + id), seq: 0, sources: [], imports: [], records: [], decisions: { merge: {}, reject: {}, split: {} }, suppression: {}, enrich: [], enrichRuns: [], cache: {}, audit: [], mappings: {}, snapshots: [], erased: [], segments: [], executions: [], modelVersions: [], stages: {}, customFields: [], config: CX.defaultConfig(), spend: 0, cacheHits: 0, derived: null });
 CX.createStore = () => ({ tenants: {} });
 CX.access = function (store, actor, tenantId) {
   if (!actor || actor.tenant_id !== tenantId) { const t = store.tenants[actor && actor.tenant_id]; if (t) CX.audit(t, actor.user || 'desconhecido', 'acesso_negado', 'tentativa de acesso a outro tenant'); throw new Error('403 · acesso negado: tenant diferente do contexto autenticado'); }
@@ -353,7 +376,7 @@ CX.processChunk = function (t, job, rows, start, end) {
     let any = false, anyValid = false;
     for (const c in map) {
       const field = map[c], v = arr[c]; if (!field || v === '' || v == null) continue;
-      const n = CX.normalize(field, v); n.raw = String(v); n.col = +c; (rec.f[field] = rec.f[field] || []).push(n); any = true; if (n.valid) anyValid = true;
+      const n = CX.isCustom(field) ? nCustom(v) : CX.normalize(field, v); n.raw = String(v); n.col = +c; (rec.f[field] = rec.f[field] || []).push(n); any = true; if (n.valid) anyValid = true;
       if (INJECTION.test(n.raw)) { rec.flags = rec.flags || {}; rec.flags.injection = true; }
     }
     if (!any) { job.rowErrors.push({ row: i + 1, msg: 'nenhum campo mapeado preenchido, registro descartado' }); continue; }
@@ -441,17 +464,21 @@ CX.rebuild = function (t) {
   clusters.forEach(members => {
     const anchor = recs[members[0]], type = members.some(i => recs[i].type === 'person') ? 'person' : 'organization';
     const p = { id: 'ent_' + hash(t.salt + anchor.id).slice(0, 10), anchor: anchor.id, type, record_ids: members.map(i => recs[i].id), sources: [], fields: {}, invalid: {}, missing: [], conflicts: [], enriched: false, flags: {} };
-    const ass = {}, srcSet = new Set(); let total = 0, validN = 0, traceN = 0, last = 0;
+    const ass = {}, xa = {}, srcSet = new Set(); let total = 0, validN = 0, traceN = 0, last = 0;
     for (const i of members) {
       const r = recs[i], s = srcById[r.source_id]; srcSet.add(r.source_id); if (r.observed_at > last) last = r.observed_at; if (r.flags && r.flags.injection) p.flags.injection = true;
       const complete = s && s.origin && s.owner && s.legal_basis && s.contract ? 1 : 0;
       for (const k in r.f) for (const x of r.f[k]) {
-        if (k === 'created_at') continue; total++; fieldStats[k].assertions++; if (x.valid) { validN++; fieldStats[k].valid++; } else fieldStats[k][x.status === 'test' ? 'test' : 'invalid']++; traceN += complete;
+        if (k === 'created_at') continue;
+        if (CX.isCustom(k)) { (xa[k] = xa[k] || []).push({ value: x.value, valid: x.valid, note: x.note, source_id: r.source_id, record_id: r.id, observed_at: r.observed_at }); continue; } total++; fieldStats[k].assertions++; if (x.valid) { validN++; fieldStats[k].valid++; } else fieldStats[k][x.status === 'test' ? 'test' : 'invalid']++; traceN += complete;
         (ass[k] = ass[k] || []).push({ field: k, value: x.value, raw: x.raw, valid: x.valid, status: x.status, note: x.note, source_id: r.source_id, record_id: r.id, observed_at: r.observed_at, method: 'Importação de arquivo', verification: x.valid ? 'validado por regra' : (x.status === 'test' ? 'dado de teste' : 'inválido'), rel: s ? s.reliability : 0.5, purposes: s ? s.purposes : [], confidence: x.valid ? Math.round((s ? s.reliability : 0.5) * 100) : 0 });
       }
       (enrByRec[r.id] || []).forEach(e => { p.enriched = true; (ass[e.field] = ass[e.field] || []).push({ field: e.field, value: e.value, raw: e.value, valid: true, status: 'valid', note: e.note, source_id: e.provider, record_id: r.id, observed_at: e.at, method: e.method, verification: e.synthetic ? 'sintético de demonstração, não verificado' : e.verification, rel: e.synthetic ? 0 : e.confidence, purposes: ['analytics', 'enrichment'], confidence: e.synthetic ? 0 : Math.round(e.confidence * 100), synthetic: !!e.synthetic, enrichment: true, run: e.run }); });
     }
     p.sources = Array.from(srcSet); p.updated_at = last;
+    // campos personalizados: valor mais recente vence; não entram nos indicadores de qualidade
+    p.extra = {};
+    for (const k in xa) { const ok = xa[k].filter(a => a.valid).sort((a, b) => b.observed_at - a.observed_at || (a.record_id < b.record_id ? 1 : -1)); if (!ok.length) continue; const distinct = new Set(ok.map(a => norm(a.value))); p.extra[k] = { value: ok[0].value, source_id: ok[0].source_id, record_id: ok[0].record_id, observed_at: ok[0].observed_at, values: distinct.size, alts: ok }; }
     let confSum = 0, confN = 0, freshSum = 0, freshN = 0;
     for (const k in ass) {
       const all = ass[k], real = all.filter(a => a.valid && !a.synthetic).sort((a, b) => b.rel - a.rel || b.observed_at - a.observed_at || (a.value < b.value ? -1 : 1));
@@ -585,12 +612,14 @@ CX.publishModel = function (t, patch, actor) { t.modelVersions.push({ version: t
 
 /* ---------- segmentação ---------- */
 CX.SEGFIELDS = { level: ['Nível (L0 a L5)', 'num'], dqi: ['Data Quality Index', 'num'], qualification: ['Qualification Score', 'num'], contactability: ['Contactability Score', 'num'], freshness: ['Freshness Score', 'num'], completeness: ['Completeness Score', 'num'], entity_type: ['Tipo de entidade', 'txt'], segment: ['Segmento empresarial', 'txt'], state: ['UF', 'txt'], city: ['Cidade', 'txt'], job_title: ['Cargo', 'txt'], source: ['Fonte', 'txt'], email_type: ['Tipo de e-mail', 'txt'], stage: ['Etapa do funil', 'txt'] };
-const segVal = (p, f) => f === 'stage' ? (p.stage ? p.stage.stage : '') : f === 'level' ? p.level : (p.scores[f] !== undefined ? p.scores[f] : f === 'entity_type' ? (p.type === 'person' ? 'pessoa' : 'organização') : f === 'source' ? p.sources.join(' ') : f === 'email_type' ? (p.fields.email ? (FREE.has(p.fields.email.value.split('@')[1]) ? 'gratuito' : 'corporativo') : '') : (p.fields[f] && !p.fields[f].synthetic ? p.fields[f].value : ''));
+const segVal = (p, f) => CX.isCustom(f) ? (p.extra && p.extra[f] ? p.extra[f].value : '') : f === 'stage' ? (p.stage ? p.stage.stage : '') : f === 'level' ? p.level : (p.scores[f] !== undefined ? p.scores[f] : f === 'entity_type' ? (p.type === 'person' ? 'pessoa' : 'organização') : f === 'source' ? p.sources.join(' ') : f === 'email_type' ? (p.fields.email ? (FREE.has(p.fields.email.value.split('@')[1]) ? 'gratuito' : 'corporativo') : '') : (p.fields[f] && !p.fields[f].synthetic ? p.fields[f].value : ''));
+CX.segFields = t => { const o = Object.assign({}, CX.SEGFIELDS); ((t && t.customFields) || []).forEach(c => { o[c.k] = [c.label + ' (personalizado)', c.type === 'número' ? 'num' : 'txt']; }); return o; };
 CX.evalSegment = function (t, seg) {
+  const SF = CX.segFields(t);
   const out = { ids: [], matched: 0, excluded: { finalidade: 0, supressao: 0 } };
-  const test = (p, r) => { const v = segVal(p, r.field), x = r.value; if (CX.SEGFIELDS[r.field][1] === 'num') { const a = +v, b = +x; return r.cmp === '>=' ? a >= b : r.cmp === '<=' ? a <= b : r.cmp === '=' ? a === b : a !== b; } const a = norm(v), b = norm(x); return r.cmp === '=' ? a === b : r.cmp === '!=' ? a !== b : r.cmp === 'contém' ? a.includes(b) : false; };
+  const test = (p, r) => { const v = segVal(p, r.field), x = r.value; if (SF[r.field][1] === 'num') { const a = +String(v).replace(',', '.').replace(/[^0-9.-]/g, ''), b = +x; return r.cmp === '>=' ? a >= b : r.cmp === '<=' ? a <= b : r.cmp === '=' ? a === b : a !== b; } const a = norm(v), b = norm(x); return r.cmp === '=' ? a === b : r.cmp === '!=' ? a !== b : r.cmp === 'contém' ? a.includes(b) : false; };
   for (const p of t.derived.profiles) {
-    const rs = seg.rules.filter(r => CX.SEGFIELDS[r.field]); const ok = !rs.length || (seg.op === 'OR' ? rs.some(r => test(p, r)) : rs.every(r => test(p, r))); if (!ok) continue; out.matched++;
+    const rs = seg.rules.filter(r => SF[r.field]); const ok = !rs.length || (seg.op === 'OR' ? rs.some(r => test(p, r)) : rs.every(r => test(p, r))); if (!ok) continue; out.matched++;
     if (p.suppressed && seg.purpose !== 'analytics') { out.excluded.supressao++; continue; }
     if (!p.elig[seg.purpose]) { out.excluded.finalidade++; continue; }
     out.ids.push(p.id);
@@ -687,6 +716,13 @@ CX.selfTest = function () {
   T('17 · Reconstrução do Golden Record', () => { const t = mk(); imp(t, 'nome,email,telefone\nAna Lima,ana@acme.example,(11) 98888-7777\nAna Lima,ana@acme.example,\nBia Souza,bia@acme.example,(21) 97777-6666'); CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['ddd_uf']); const s1 = CX.signature(t); t.derived = null; CX.rebuild(t); return { ok: CX.signature(t) === s1, detail: 'perfis idênticos após reconstrução a partir de registros, decisões e evidências' }; });
   T('18 · Registro de custos e auditoria', () => { const t = mk(); t.config.budget.enrichMonthly = 10; imp(t, 'nome,email\nAna Lima,ana@acme.example'); const run = CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['demo_b2b']); const p = t.derived.profiles[0]; return { ok: run.cost === 0.35 && t.spend === 0.35 && t.audit.some(a => a.action === 'enriquecimento_executado') && p.fields.job_title.synthetic === true && p.scores.completeness === 36, detail: 'custo R$ 0,35 registrado, valor sintético fora dos indicadores' }; });
   T('19 · Classificação de etapa do funil', () => { const t = mk(); imp(t, 'nome,email,status,observacoes\nAna Lima,ana@acme.example,Closed Won,\nBia Souza,bia@acme.example,Proposta enviada,\nCaio Dias,caio@acme.example,,Pediu retorno em março\nDani Reis,dani@acme.example,,'); const st = n => t.derived.profiles.find(p => p.name === n).stage; return { ok: st('Ana Lima').stage === 'cliente' && st('Bia Souza').stage === 'negociacao' && st('Caio Dias').needsAI && !st('Dani Reis').needsAI, detail: 'regras resolvem status conhecidos; observações livres vão para a IA' }; });
+  T('20 · Campo personalizado criado na importação', () => {
+    const csv = 'Nome,E-mail,MAC\nAna Lima,ana@acme.example,06:BA:9F:E2:91:18\nAna Lima,ana@acme.example,0A:3B:93:93:83:E1\nBia Souza,bia@acme.example,22:05:14:35:2F:6A';
+    const run = withMac => { const t = mk(), p = CX.parseText('wifi.csv', csv), k = CX.customKey('MAC'); const mapping = { 0: 'full_name', 1: 'email' }; if (withMac) { CX.addCustomField(t, 'MAC', 'teste', { samples: p.rows.map(r => r[2]) }); mapping[2] = k; } CX.importSync(t, { sourceId: t.sources[0].id, fileName: 'wifi.csv', fileHash: CX.hash(csv), format: 'CSV', encoding: 'UTF-8', at: CX.now(), actor: 'teste', mapping, headerMap: {}, sig: 'x' }, p.rows); return t; };
+    const a = run(true), b = run(false), k = CX.customKey('MAC'), ana = a.derived.profiles.find(p => p.name === 'Ana Lima'), cf = a.customFields[0];
+    const seg = CX.evalSegment(a, { op: 'AND', purpose: 'analytics', rules: [{ field: k, cmp: 'contém', value: '22:05' }] });
+    return { ok: k === 'x_mac' && cf.type === 'identificador de dispositivo' && ana.extra[k] && ana.extra[k].values === 2 && a.derived.avg.dqi === b.derived.avg.dqi && seg.matched === 1 && a.audit.some(x => x.action === 'campo_criado'), detail: 'coluna sem campo canônico gravada como campo novo, sem alterar os indicadores, e disponível na segmentação' };
+  });
   return out;
 };
 
