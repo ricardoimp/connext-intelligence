@@ -400,11 +400,13 @@ export default {
             const id = 'cn_' + rid().slice(0, 10), cfg = {};
             (TYPES[b.type].fields || []).forEach(([k]) => { if (b.config && b.config[k] != null) cfg[k] = String(b.config[k]).slice(0, 4000); });
             let secretEnc = null, key = null, keyHash = null;
-            if (TYPES[b.type].secret) { if (!b.secret) return fail(400, 'Informe a credencial da conexão.'); secretEnc = await seal(env, String(b.secret)); }
+            const waiting = TYPES[b.type].secret && !b.secret && b.type === 'api_rest';
+            if (TYPES[b.type].secret && !waiting) { if (!b.secret) return fail(400, 'Informe a credencial da conexão.'); secretEnc = await seal(env, String(b.secret)); }
             if (b.type === 'webhook') { key = 'cx_' + rid() + rid(); keyHash = await sha256(key); }
             await env.DB.prepare('INSERT INTO connectors (tenant_id, id, type, name, source_id, config_json, secret_enc, key_hash, status, schedule_minutes, created_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-              .bind(tid, id, b.type, String(b.name || TYPES[b.type].label).slice(0, 80), srcRow.id, JSON.stringify(cfg), secretEnc, keyHash, 'ativo', Math.max(TYPES[b.type].minSchedule || 15, Math.min(1440, +b.schedule_minutes || 60)), now(), user.email).run();
+              .bind(tid, id, b.type, String(b.name || TYPES[b.type].label).slice(0, 80), srcRow.id, JSON.stringify(cfg), secretEnc, keyHash, waiting ? 'pausado' : 'ativo', Math.max(TYPES[b.type].minSchedule || 15, Math.min(1440, +b.schedule_minutes || 60)), now(), user.email).run();
             if (b.mapping && typeof b.mapping === 'object') { const m = {}; Object.entries(b.mapping).forEach(([h, f]) => { m[String(h).slice(0, 120)] = f && (globalThis.CX.F[f] || /^x_[a-z0-9]{1,40}$/.test(f)) ? f : null; }); await env.DB.prepare('UPDATE connectors SET mapping_json = ? WHERE tenant_id = ? AND id = ?').bind(JSON.stringify(m), tid, id).run(); }
+            if (waiting) await env.DB.prepare('UPDATE connectors SET last_error = ? WHERE tenant_id = ? AND id = ?').bind('Aguardando a chave de acesso: use Informar credencial.', tid, id).run();
             await audit(env, tid, user.email, 'conector_criado', TYPES[b.type].label + ' · ' + (b.name || ''), id);
             return json({ ok: true, id, key, endpoint: b.type === 'webhook' ? 'https://' + (env.INGEST_HOST || 'ingest.connextintelligence.com') + '/in/' + tid + '/' + id : null });
           }
@@ -427,7 +429,7 @@ export default {
             if (action === 'secret' && req.method === 'POST') {
               const b = await req.json(); if (!TYPES[c.type] || !TYPES[c.type].secret) return fail(400, 'Esta conexão não usa credencial.');
               if (!b.secret || String(b.secret).length < 8) return fail(400, 'Informe a credencial completa.');
-              await env.DB.prepare('UPDATE connectors SET secret_enc = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(await seal(env, String(b.secret)), tid, cid).run();
+              await env.DB.prepare("UPDATE connectors SET secret_enc = ?, last_error = NULL, status = CASE WHEN secret_enc IS NULL THEN 'ativo' ELSE status END, last_sync_at = CASE WHEN secret_enc IS NULL THEN NULL ELSE last_sync_at END WHERE tenant_id = ? AND id = ?").bind(await seal(env, String(b.secret)), tid, cid).run();
               await audit(env, tid, user.email, 'conector_credencial_trocada', c.name, c.id);
               return json({ ok: true });
             }
