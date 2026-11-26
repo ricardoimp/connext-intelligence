@@ -3,7 +3,7 @@
    O restante das rotas é servido pelos arquivos estáticos em /public. */
 
 import '../public/engine.js';
-import { analyzeSource, classifyStages, aiBudget } from './ai.js';
+import { analyzeSource, classifyStages, aiBudget, aiReport } from './ai.js';
 import { TYPES, fetchBatch } from './connectors.js';
 import { seal, open, sha256 } from './vault.js';
 import { serverImport } from './ingest.js';
@@ -353,7 +353,8 @@ export default {
           if (what === 'usage' && req.method === 'GET') {
             const b = await aiBudget(env, tid);
             const runs = (await env.DB.prepare('SELECT agent, model, at, input_tokens, output_tokens, cost FROM agent_executions WHERE tenant_id = ? ORDER BY at DESC LIMIT 50').bind(tid).all()).results;
-            return json({ ok: true, budget: b, runs });
+            const report = await aiReport(env, tid);
+            return json(Object.assign({ ok: true, budget: b }, report));
           }
           if (!can(role, 'import') && !can(role, 'enrich')) return fail(403, 'Seu papel não permite usar o motor de IA.');
           try {

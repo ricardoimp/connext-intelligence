@@ -348,13 +348,13 @@ V.monitoring = () => {
   const k = (l, v, s) => `<section class="card kpi c3"><h3>${l}</h3><div class="v">${v}</div><div class="s">${s}</div></section>`;
   const byP = {}; t.enrichRuns.forEach(r => { for (const p in r.byProvider) { const b = byP[p] = byP[p] || { queries: 0, fields: 0, cost: 0 }; b.queries += r.byProvider[p].queries; b.fields += r.byProvider[p].fields; b.cost += r.byProvider[p].cost; } });
   return `<div class="grid">
+  ${aiMonitor(t)}
   ${k('Processamento por milhão', rows ? fmt(Math.round(ms / rows * 1e6 / 1000)) + ' s' : 'n/d', 'extrapolado do throughput medido neste navegador')}
   ${k('Gasto com provedores', money(t.spend), `orçamento ${money(t.config.budget.enrichMonthly)} · ${fmt(q)} consultas`)}
   ${k('Custo por atributo validado', real ? money(t.spend / real) : 'n/d', `${fmt(real)} atributos sustentados por evidência`)}
   ${k('Taxa de enriquecimento útil', q ? pct(real, q) + '%' : 'n/d', `${fmt(t.cacheHits)} consultas duplicadas evitadas`)}
   ${k('Volume bruto recebido', (bytes / 1024).toLocaleString('pt-BR', { maximumFractionDigits: 0 }) + ' KB', `${fmt(t.records.length)} registros em memória`)}
   ${k('Custo por perfil qualificado', ps.filter(p => p.scores.qualification >= 60).length ? money(t.spend / ps.filter(p => p.scores.qualification >= 60).length) : 'n/d', `${fmt(ps.filter(p => p.scores.qualification >= 60).length)} perfis com Qualification a partir de 60`)}
-  ${k('Tokens da CONNEXT IA', 'não medido', `${S.ai.log.length} perguntas nesta sessão · o runtime não informa tokens`)}
   ${k('Última reconstrução', t.derived ? t.derived.ms + ' ms' : 'n/d', 'resolução, golden record e pontuação')}
   ${card('c6', 'Custo por provedor', '', tbl(['Provedor', 'n:Consultas', 'n:Atributos', 'n:Custo', 'n:Aproveitamento'], Object.entries(byP).map(([p, b]) => `<tr><td>${esc(srcName(p))}</td><td class="n">${fmt(b.queries)}</td><td class="n">${fmt(b.fields)}</td><td class="n">${money(b.cost)}</td><td class="n">${pct(b.fields, b.queries)}%</td></tr>`)))}
   ${card('c6', 'Suíte de testes do motor', 'os 18 cenários obrigatórios, executados de verdade neste navegador', `<div class="row"><button class="btn pri" data-act="selftest">Executar suíte</button>${S.tests ? chip(S.tests.filter(x => x.ok).length + ' de ' + S.tests.length + ' aprovados', S.tests.every(x => x.ok) ? 'good' : 'crit') : '<span class="muted">Leva cerca de um segundo.</span>'}</div>${S.tests ? tbl(['Cenário', 'Resultado', 'Evidência', 'n:Tempo'], S.tests.map(x => `<tr><td>${esc(x.name)}</td><td>${chip(x.ok ? 'aprovado' : 'falhou', x.ok ? 'good' : 'crit')}</td><td class="muted">${esc(x.detail)}</td><td class="n">${x.ms} ms</td></tr>`)) : ''}`)}</div>`;
@@ -478,6 +478,7 @@ const ACT = {
     try { if (downloads) { await downloads.save({ filename: fn, data }); toast('Exportação entregue: ' + fn); } else { const u = URL.createObjectURL(new Blob([data], { type: 'text/csv;charset=utf-8' })), l = document.createElement('a'); l.href = u; l.download = fn; document.body.appendChild(l); l.click(); l.remove(); setTimeout(() => URL.revokeObjectURL(u), 2000); toast('Exportação entregue: ' + fn); } } catch (e) { toast('A exportação não foi concluída: ' + (e.message || 'recusada pelo navegador'), true); }
   },
   askPreset(el) { ask(el.dataset.q); },
+  aiRefresh() { delete S.aiUsage[T().id]; rerender(); },
   selftest() { toast('Executando os 18 cenários.'); setTimeout(() => { S.tests = CX.selfTest(); rerender(); }, 30); },
   switchTenant(el) { setTenant(el.dataset.id); },
   memberRemove(el) {
@@ -567,6 +568,58 @@ if (window.claude && window.claude.use) { window.claude.use('sample').then(s => 
 /* ---------- motor de IA: interface ---------- */
 const STAGE_SHORT = { novo: 'Novo', identificado: 'Identificado', enriquecido: 'Enriquecido', mql: 'MQL', sql: 'SQL', negociacao: 'Negociação', cliente: 'Cliente', descartado: 'Descartado' };
 const aiName = m => /haiku/i.test(m || '') ? 'CONNEXT IA · rápido' : 'CONNEXT IA · analítico';
+function loadAiUsage(t) { if (S.aiUsage[t.id] === 'loading') return; S.aiUsage[t.id] = 'loading'; CXSync.aiUsage(t.id).then(r => { S.aiUsage[t.id] = r; if (S.view === 'ai' || S.view === 'monitoring') rerender(); }).catch(e => { S.aiUsage[t.id] = { error: e.message }; if (S.view === 'ai' || S.view === 'monitoring') rerender(); }); }
+
+/* ---------- consumo da CONNEXT IA (Monitoring) ---------- */
+const nf = (n, d) => Number(n || 0).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+const usd = (n, d) => 'US$ ' + nf(n, d == null ? 2 : d), brl = (n, d) => 'R$ ' + nf(n, d == null ? 2 : d);
+const brlOf = (x, d) => x.brl == null ? 'câmbio indisponível' : (x.estimated ? '≈ ' : '') + brl(x.brl, d);
+const TASK = { leitura_de_fonte: 'Leitura de fonte', classificacao_funil: 'Funil comercial' };
+const tokK = n => n >= 1e6 ? nf(n / 1e6, 2) + ' mi' : n >= 1e4 ? nf(n / 1e3, 1) + ' mil' : fmt(n);
+function dayCols(days, series, fv, unit) {
+  const W = 620, H = 210, l = 52, r = 8, tp = 12, b = 24, n = days.length, tot = days.map((_, i) => series.reduce((a, s) => a + s.values[i], 0)), max = nice(Math.max(fv === 'money' ? 0.01 : 1, ...tot)), st = (W - l - r) / n, bw = Math.max(3, st - 4);
+  const y = v => tp + (H - tp - b) * (1 - v / max), lab = v => fv === 'money' ? nf(v, max <= 0.2 ? 3 : max <= 20 ? 2 : 0) : tokK(v); let o = '';
+  for (let k = 0; k <= 4; k++) { const v = max * k / 4; o += `<line x1="${l}" x2="${W - r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--gridline)"/><text x="${l - 6}" y="${y(v) + 3}" text-anchor="end">${lab(v)}</text>`; }
+  days.forEach((d, i) => {
+    const x = l + i * st + (st - bw) / 2; let acc = 0;
+    series.forEach((s, si) => { const v = s.values[i]; if (!v) return; const y0 = y(acc), y1 = y(acc + v), top = si === series.length - 1 || !series.slice(si + 1).some(z => z.values[i]); const hgt = Math.max(1, y0 - y1 - (acc ? 2 : 0)), rr = top ? Math.min(3, hgt, bw / 2) : 0, yt = y1;
+      o += `<path d="M${x},${y0 - (acc ? 2 : 0)} V${yt + rr} Q${x},${yt} ${x + rr},${yt} H${x + bw - rr} Q${x + bw},${yt} ${x + bw},${yt + rr} V${y0 - (acc ? 2 : 0)} Z" fill="${s.color}"/>`; acc += v; });
+    if (i % 5 === 0 || i === n - 1) o += `<text x="${x + bw / 2}" y="${H - 7}" text-anchor="middle">${d.slice(8, 10)}/${d.slice(5, 7)}</text>`;
+    o += `<rect class="band hit" x="${l + i * st}" y="${tp}" width="${st}" height="${H - tp - b}" data-tip="${esc(d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4) + '|' + series.map(s => s.name + ': ' + s.tip(i)).join('|') + (unit ? '|' + unit(i) : ''))}"/>`;
+  });
+  o += `<line x1="${l}" x2="${W - r}" y1="${y(0)}" y2="${y(0)}" stroke="var(--axis)"/>`;
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Consumo diário da CONNEXT IA">${o}</svg>${series.length > 1 ? `<div class="legend">${series.map(s => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('')}</div>` : ''}`;
+}
+function aiMonitor(t) {
+  if (!t.remote) return card('c12', 'Consumo da CONNEXT IA', '', '<p class="muted">Disponível nas organizações salvas no banco, com login.</p>');
+  const u = S.aiUsage[t.id];
+  if (!u || u === 'loading') { loadAiUsage(t); return card('c12', 'Consumo da CONNEXT IA', '', '<p class="muted">Carregando consumo de tokens e custos.</p>'); }
+  if (u.error) return card('c12', 'Consumo da CONNEXT IA', '', `<p class="note crit">${esc(u.error)}</p>`);
+  if (!u.totals) return card('c12', 'Consumo da CONNEXT IA', '', '<p class="muted">Atualize a página para ver o relatório completo.</p>');
+  const { all, month, today } = u.totals, fx = u.fx, b = u.budget;
+  const kp = (l, v, s, extra) => `<section class="card kpi c2"><h3>${l}</h3><div class="v" style="font-size:22px">${v}</div><div class="s">${s}</div>${extra || ''}</section>`;
+  const map = {}; (u.daily || []).forEach(d => map[d.day] = d); const days = []; for (let i = 29; i >= 0; i--) days.push(new Date(Date.now() - 3 * 3600e3 - i * DAY).toISOString().slice(0, 10));
+  const D = k => days.map(d => map[d] ? map[d][k] : 0);
+  const tin = D('tin'), tout = D('tout'), cb = D('brl'), cu = D('usd'), calls = D('calls');
+  const tokChart = dayCols(days, [{ name: 'Tokens de entrada', color: 'var(--s1)', values: tin, tip: i => fmt(tin[i]) }, { name: 'Tokens de saída', color: 'var(--s2)', values: tout, tip: i => fmt(tout[i]) }], 'tok', i => fmt(calls[i]) + ' chamada(s) · ' + usd(cu[i], 4));
+  const costChart = dayCols(days, [{ name: 'Custo em reais', color: 'var(--s3)', values: cb, tip: i => brl(cb[i], 2) }], 'money', i => usd(cu[i], 4) + ' · ' + fmt(calls[i]) + ' chamada(s)');
+  const fxTxt = fx ? brl(fx.rate, 4) : 'indisponível', fxSub = fx ? `por US$ 1 · ${esc(fx.source)}${fx.ref_date ? ' · cotação de ' + esc(String(fx.ref_date).slice(0, 10).split('-').reverse().join('/')) : ''}${fx.stale ? ' · último câmbio guardado' : ''}` : 'as fontes de câmbio não responderam';
+  const used = b.budget ? pct(b.spent, b.budget) : 0;
+  const priceRows = Object.entries(u.prices || {}).map(([m, p]) => `${aiName(m)}: ${usd(p[0])} entrada · ${usd(p[1])} saída`).join('<br>');
+  const est = [all, month].some(x => x && x.estimated) ? '<p class="muted" style="margin:6px 0 0">≈ chamadas feitas antes do registro de câmbio convertidas pelo câmbio atual.</p>' : '';
+  return `${card('c12', 'Consumo da CONNEXT IA', 'tokens e custo da API de IA, em dólar e em real', `<div class="row"><span class="muted">Valores em reais usam o câmbio do dia de cada chamada. Mês corrente desde ${dt(u.monthStart)}.</span><span class="sp" style="flex:1"></span><button class="btn sm" data-act="aiRefresh">Atualizar</button></div>${est}`)}
+  ${kp('Tokens no mês', tokK(month.tin + month.tout), `${tokK(month.tin)} entrada · ${tokK(month.tout)} saída · ${fmt(month.calls)} chamadas`)}
+  ${kp('Custo no mês (US$)', usd(month.usd), `orçamento ${usd(b.budget)} · ${used}% usado`, meter(used, used > 80 ? 'var(--warn)' : 'var(--s3)'))}
+  ${kp('Custo no mês (R$)', brlOf(month), month.calls ? 'média ' + brl(month.brl / month.calls, 4) + ' por chamada' : 'nenhuma chamada no mês')}
+  ${kp('Hoje', brlOf(today), `${usd(today.usd, 4)} · ${tokK(today.tin + today.tout)} tokens · ${fmt(today.calls)} chamadas`)}
+  ${kp('Desde o início', brlOf(all), `${usd(all.usd)} · ${tokK(all.tin + all.tout)} tokens${all.first ? ' · desde ' + dt(all.first) : ''}`)}
+  ${kp('Câmbio usado hoje', fxTxt, fxSub)}
+  ${card('c6', 'Tokens por dia', 'últimos 30 dias, entrada e saída', tokChart)}
+  ${card('c6', 'Custo por dia em reais', 'últimos 30 dias; passe o mouse para ver em dólar', costChart)}
+  ${card('c7', 'Consumo por tarefa', 'desde o início', tbl(['Tarefa', 'n:Chamadas', 'n:Entrada', 'n:Saída', 'n:US$', 'n:R$', 'n:R$ por chamada'], (u.byTask || []).map(x => `<tr><td><b>${esc(TASK[x.agent] || x.agent)}</b><br><span class="muted">${aiName(x.model)}${/simulado/.test(x.model) ? ' · simulado' : ''}</span></td><td class="n">${fmt(x.calls)}</td><td class="n">${fmt(x.tin)}</td><td class="n">${fmt(x.tout)}</td><td class="n">${usd(x.usd, 4)}</td><td class="n">${brlOf(x, 4)}</td><td class="n">${x.calls ? brl(x.brl / x.calls, 4) : ''}</td></tr>`)) + `<p class="muted" style="margin-top:8px">Preço por milhão de tokens:<br>${priceRows}</p>`)}
+  ${card('c5', 'Consumo por usuário', 'quem acionou a IA, desde o início', tbl(['Usuário', 'n:Chamadas', 'n:Tokens', 'n:US$', 'n:R$'], (u.byUser || []).map(x => `<tr><td>${esc(x.actor)}</td><td class="n">${fmt(x.calls)}</td><td class="n">${fmt(x.tin + x.tout)}</td><td class="n">${usd(x.usd, 4)}</td><td class="n">${brlOf(x, 4)}</td></tr>`)))}
+  ${card('c12', 'Últimas chamadas', 'as 50 mais recentes', tbl(['Quando', 'Tarefa', 'Motor', 'Usuário', 'n:Entrada', 'n:Saída', 'n:US$', 'n:Câmbio', 'n:R$'], (u.runs || []).map(r => `<tr><td>${dtm(r.at)}</td><td>${esc(TASK[r.agent] || r.agent)}</td><td>${aiName(r.model)}</td><td>${esc(r.actor || 'sistema')}</td><td class="n">${fmt(r.input_tokens)}</td><td class="n">${fmt(r.output_tokens)}</td><td class="n">${usd(r.cost, 4)}</td><td class="n">${r.fx_rate ? nf(r.fx_rate, 4) : '<span class="muted">atual</span>'}</td><td class="n">${r.brl == null ? 'n/d' : (r.estimated ? '≈ ' : '') + brl(r.brl, 4)}</td></tr>`)))}`;
+}
 const methodLabel = m => m === 'ia' ? 'decidido pela CONNEXT IA' : m === 'humano' ? 'definido por pessoa' : 'regra automática';
 const KIND = { lista_de_leads: 'Lista de leads', exportacao_crm: 'Exportação de CRM', lista_de_empresas: 'Lista de empresas', formulario_ou_captura: 'Formulário ou captura', eventos_ou_presenca: 'Evento ou presença', clientes_ou_vendas: 'Clientes ou vendas', outro: 'Outro tipo de base' };
 function maskSample(v) {
@@ -649,7 +702,7 @@ async function runStageAI(silent) {
 function aiUsageBody(t) {
   if (!t.remote) return '<p class="muted">Disponível na versão hospedada.</p>';
   const u = S.aiUsage[t.id];
-  if (!u) { CXSync.aiUsage(t.id).then(r => { S.aiUsage[t.id] = r; if (S.view === 'ai') rerender(); }).catch(e => { S.aiUsage[t.id] = { error: e.message }; if (S.view === 'ai') rerender(); }); return '<p class="muted">Carregando consumo.</p>'; }
+  if (!u || u === 'loading') { loadAiUsage(t); return '<p class="muted">Carregando consumo.</p>'; }
   if (u.error) return `<p class="note crit">${esc(u.error)}</p>`;
   const b = u.budget;
   return `${b.configured ? '' : '<p class="note crit">A chave do provedor da CONNEXT IA ainda não foi configurada no servidor. Veja as instruções em Administration.</p>'}<div class="kpi"><div class="v">US$ ${b.spent.toFixed(2)} <span class="muted" style="font-size:13px">de US$ ${b.budget.toFixed(2)}</span></div></div>${meter(pct(b.spent, b.budget || 1), b.spent > b.budget * 0.8 ? 'var(--warn)' : 'var(--s3)')}<div class="kv" style="margin-top:8px"><dt>Chamadas</dt><dd class="mono">${fmt(b.calls)}</dd><dt>Tokens de entrada</dt><dd class="mono">${fmt(b.input_tokens)}</dd><dt>Tokens de saída</dt><dd class="mono">${fmt(b.output_tokens)}</dd></div>

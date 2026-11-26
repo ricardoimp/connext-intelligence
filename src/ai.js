@@ -8,6 +8,55 @@ const PRICE = { 'claude-sonnet-5-5': [2, 10], 'claude-haiku-5-5': [0.10, 0.50] }
 const now = () => Date.now();
 const rid = () => crypto.randomUUID().replace(/-/g, '').slice(0, 16);
 
+/* ---------- câmbio dólar/real ----------
+   Fonte principal: PTAX de venda do Banco Central (oficial). Reserva: cotação comercial da AwesomeAPI.
+   Consulta no máximo uma vez por dia; se as fontes falharem, usa o último câmbio guardado. */
+const brDay = ms => new Date(ms - 3 * 3600e3).toISOString().slice(0, 10);
+const mdY = d => d.slice(5, 7) + '-' + d.slice(8, 10) + '-' + d.slice(0, 4);
+async function fetchPTAX() {
+  const t = now(), a = mdY(brDay(t - 10 * 864e5)), b = mdY(brDay(t));
+  const u = "https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/CotacaoDolarPeriodo(dataInicial=@dataInicial,dataFinalCotacao=@dataFinalCotacao)?@dataInicial='" + a + "'&@dataFinalCotacao='" + b + "'&$top=100&$format=json&$select=cotacaoVenda,dataHoraCotacao";
+  const r = await fetch(encodeURI(u), { signal: AbortSignal.timeout(5000) }); if (!r.ok) throw new Error('PTAX ' + r.status);
+  const v = ((await r.json()).value || []).filter(x => x.cotacaoVenda > 0).sort((x, y) => (x.dataHoraCotacao < y.dataHoraCotacao ? -1 : 1)).pop();
+  if (!v) throw new Error('PTAX sem cotação'); return { rate: +v.cotacaoVenda, source: 'PTAX de venda · Banco Central', ref_date: v.dataHoraCotacao };
+}
+async function fetchAwesome() {
+  const r = await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL', { signal: AbortSignal.timeout(5000) }); if (!r.ok) throw new Error('AwesomeAPI ' + r.status);
+  const v = (await r.json()).USDBRL; if (!v || !(+v.ask > 0)) throw new Error('AwesomeAPI sem cotação'); return { rate: +v.ask, source: 'Dólar comercial · AwesomeAPI', ref_date: v.create_date };
+}
+export async function fxRate(env) {
+  const day = brDay(now());
+  const last = await env.DB.prepare('SELECT rate, source, ref_date, day, at FROM fx_rates WHERE pair = ? ORDER BY day DESC LIMIT 1').bind('USDBRL').first().catch(() => null);
+  if (last && last.day === day) return last;
+  for (const f of [fetchPTAX, fetchAwesome]) {
+    try { const q = await f(); const row = Object.assign({ day, at: now() }, q); await env.DB.prepare('INSERT OR REPLACE INTO fx_rates (pair, day, rate, source, ref_date, at) VALUES (?,?,?,?,?,?)').bind('USDBRL', day, row.rate, row.source, row.ref_date, row.at).run(); return row; }
+    catch (e) { /* tenta a próxima fonte */ }
+  }
+  return last ? Object.assign({ stale: true }, last) : null;
+}
+
+/* ---------- relatório de consumo para o Monitoring ---------- */
+export async function aiReport(env, tid) {
+  const fx = await fxRate(env), cur = fx ? fx.rate : null, t = now(), d = new Date(t);
+  const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1), dayStart = Date.parse(brDay(t) + 'T03:00:00Z'), since = dayStart - 29 * 864e5;
+  const AGG = 'COUNT(*) AS calls, COALESCE(SUM(input_tokens),0) AS tin, COALESCE(SUM(output_tokens),0) AS tout, COALESCE(SUM(cost),0) AS usd, COALESCE(SUM(cost_brl),0) AS brl_known, COALESCE(SUM(CASE WHEN cost_brl IS NULL THEN cost ELSE 0 END),0) AS usd_open';
+  const q = (sql, ...b) => env.DB.prepare(sql).bind(tid, ...b);
+  const [all, month, today, daily, byTask, byUser, runs] = await Promise.all([
+    q('SELECT ' + AGG + ', MIN(at) AS first FROM agent_executions WHERE tenant_id = ?').first(),
+    q('SELECT ' + AGG + ' FROM agent_executions WHERE tenant_id = ? AND at >= ?', monthStart).first(),
+    q('SELECT ' + AGG + ' FROM agent_executions WHERE tenant_id = ? AND at >= ?', dayStart).first(),
+    q("SELECT date((at - 10800000) / 1000, 'unixepoch') AS day, " + AGG + ' FROM agent_executions WHERE tenant_id = ? AND at >= ? GROUP BY day ORDER BY day', since).all().then(r => r.results),
+    q('SELECT agent, model, ' + AGG + ' FROM agent_executions WHERE tenant_id = ? GROUP BY agent, model ORDER BY usd DESC').all().then(r => r.results),
+    q("SELECT COALESCE(json_extract(data_json, '$.actor'), 'sistema') AS actor, " + AGG + ' FROM agent_executions WHERE tenant_id = ? GROUP BY actor ORDER BY usd DESC LIMIT 20').all().then(r => r.results),
+    q('SELECT agent, model, at, input_tokens, output_tokens, cost, fx_rate, cost_brl, json_extract(data_json, \'$.actor\') AS actor FROM agent_executions WHERE tenant_id = ? ORDER BY at DESC LIMIT 50').all().then(r => r.results)
+  ]);
+  // reais: câmbio do dia de cada chamada; chamadas anteriores ao registro do câmbio usam o câmbio atual
+  const brl = x => x ? x.brl_known + (cur ? x.usd_open * cur : 0) : 0;
+  [all, month, today].concat(daily, byTask, byUser).forEach(x => { if (x) { x.brl = brl(x); x.estimated = x.usd_open > 0; } });
+  runs.forEach(r => { r.brl = r.cost_brl != null ? r.cost_brl : (cur ? r.cost * cur : null); r.estimated = r.cost_brl == null; });
+  return { fx, totals: { all, month, today }, daily, byTask, byUser, runs, prices: PRICE, monthStart, since };
+}
+
 export async function aiBudget(env, tid) {
   const t = await env.DB.prepare('SELECT config_json FROM tenants WHERE id = ?').bind(tid).first();
   let cfg = {}; try { cfg = JSON.parse(t.config_json || '{}'); } catch (e) { /* configuração vazia */ }
@@ -37,8 +86,9 @@ async function claude(env, tid, actor, agent, model, system, user, schema, maxTo
     data = JSON.parse(block.text); usage = j.usage || {}; used = j.model || model;
   }
   const p = PRICE[model] || [0, 0], cost = ((usage.input_tokens || 0) * p[0] + (usage.output_tokens || 0) * p[1]) / 1e6;
-  await env.DB.prepare('INSERT INTO agent_executions (tenant_id, id, agent, model, at, input_tokens, output_tokens, cost, data_json) VALUES (?,?,?,?,?,?,?,?,?)')
-    .bind(tid, 'ag_' + rid(), agent, used + (env.AI_MOCK ? ' (simulado)' : ''), now(), usage.input_tokens || 0, usage.output_tokens || 0, cost, JSON.stringify({ actor })).run();
+  const fx = await fxRate(env).catch(() => null);
+  await env.DB.prepare('INSERT INTO agent_executions (tenant_id, id, agent, model, at, input_tokens, output_tokens, cost, data_json, fx_rate, cost_brl) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+    .bind(tid, 'ag_' + rid(), agent, used + (env.AI_MOCK ? ' (simulado)' : ''), now(), usage.input_tokens || 0, usage.output_tokens || 0, cost, JSON.stringify({ actor }), fx ? fx.rate : null, fx ? cost * fx.rate : null).run();
   return { data, usage, cost, model: used, mock: !!env.AI_MOCK };
 }
 
