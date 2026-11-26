@@ -44,12 +44,12 @@ async function inQuery(env, sqlHead, tid, ids, tail) { const out = []; for (cons
 
 // índice de chaves fortes e de nomes (homônimos) de cada registro
 async function indexRecords(env, tid, recs) {
+  const keys = [], names = [];
+  for (const r of recs) { CX.recordKeys(r).forEach(k => keys.push([k, r.id])); const hk = CX.homonymKey(r); if (hk) names.push([hk, r.id]); }
+  // várias linhas por comando (limite de 100 parâmetros por consulta no D1)
   const st = [];
-  for (const r of recs) {
-    CX.recordKeys(r).forEach(k => st.push(env.DB.prepare('INSERT OR IGNORE INTO record_keys (tenant_id, k, record_id) VALUES (?,?,?)').bind(tid, k, r.id)));
-    const hk = CX.homonymKey(r); if (hk) st.push(env.DB.prepare('INSERT OR IGNORE INTO record_names (tenant_id, k, record_id) VALUES (?,?,?)').bind(tid, hk, r.id));
-  }
-  for (const c of chunks(st, 500)) await env.DB.batch(c);
+  for (const [tb, rows] of [['record_keys', keys], ['record_names', names]]) for (const c of chunks(rows, 33)) st.push(env.DB.prepare('INSERT OR IGNORE INTO ' + tb + ' (tenant_id, k, record_id) VALUES ' + c.map(() => '(?,?,?)').join(',')).bind(...[].concat(...c.map(x => [tid, x[0], x[1]]))));
+  for (const c of chunks(st, 200)) await env.DB.batch(c);
 }
 // organizações do tenant inteiro (vínculo com o master no enriquecimento interno)
 async function orgProfiles(env, ctx, tid) {
@@ -157,13 +157,15 @@ export async function processQueue(env, tid, budgetMs, withCands) {
     // ser a mesma do cálculo completo. Quando um bloco passa de 200 registros, os perfis que o usavam são recalculados.
     let pendingIdx = true;
     while (now() - t0 < budgetMs) {
-      const qi = (await env.DB.prepare('SELECT record_id FROM profile_queue WHERE tenant_id = ? AND indexed = 0 LIMIT 2000').bind(tid).all()).results.map(x => x.record_id);
+      const qi = (await env.DB.prepare('SELECT record_id FROM profile_queue WHERE tenant_id = ? AND indexed = 0 LIMIT 3000').bind(tid).all()).results.map(x => x.record_id);
       if (!qi.length) { pendingIdx = false; break; }
       const recs = (await inQuery(env, 'SELECT ' + REC_COLS + ' FROM source_records WHERE tenant_id = ? AND id IN', tid, qi)).map(recOf);
       const touched = Array.from(new Set([].concat(...recs.map(r => CX.recordKeys(r)))));
-      const before = await keyCounts(env, tid, touched);
+      // na carga inicial ainda não existe perfil calculado, então não há bloco "que passou de 200" a recalcular
+      const fresh = ctx.tn.profiles_mode === 'migrating' && !ctx.anyCard && !(ctx.anyCard = !!(await env.DB.prepare('SELECT 1 AS x FROM canonical_entities WHERE tenant_id = ? AND card_json IS NOT NULL LIMIT 1').bind(tid).first()));
+      const before = fresh ? new Map() : await keyCounts(env, tid, touched);
       await indexRecords(env, tid, recs);
-      const after = await keyCounts(env, tid, touched), crossed = touched.filter(k => (before.get(k) || 0) <= OVERSIZED && (after.get(k) || 0) > OVERSIZED);
+      const after = fresh ? new Map() : await keyCounts(env, tid, touched), crossed = touched.filter(k => (before.get(k) || 0) <= OVERSIZED && (after.get(k) || 0) > OVERSIZED);
       const st = crossed.map(k => env.DB.prepare('INSERT INTO profile_queue (tenant_id, record_id, op, at, indexed) SELECT tenant_id, record_id, NULL, ?, 1 FROM record_keys WHERE tenant_id = ? AND k = ? ON CONFLICT (tenant_id, record_id) DO NOTHING').bind(now(), tid, k));
       for (const c of chunks(qi, 90)) st.push(env.DB.prepare('UPDATE profile_queue SET indexed = 1 WHERE tenant_id = ? AND record_id IN (' + Q(c.length) + ')').bind(tid, ...c));
       for (const c of chunks(st, 400)) await env.DB.batch(c);
