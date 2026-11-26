@@ -13,7 +13,11 @@ Produção: https://plataforma.connextintelligence.com (protegida por Cloudflare
 | `public/app.js` | Interface com as 18 áreas da plataforma |
 | `public/sync.js` | Persistência: carrega o tenant do banco e envia só o que mudou |
 | `src/index.js` | API do Worker: valida o login do Cloudflare Access, tenants, membros, sincronização, arquivos RAW |
-| `migrations/` | Esquema do banco D1 (modelo canônico completo) |
+| `migrations/` | Esquema do banco D1 (modelo canônico completo, conectores, funil) |
+| `src/ai.js` | Motor de IA: leitura de arquivos e conexões e classificação do funil pela API do Claude, com orçamento e custo por chamada |
+| `src/connectors.js` | Conectores de leitura: Google Sheets, HubSpot, Salesforce, PostgreSQL, MySQL |
+| `src/ingest.js` | Importação no servidor (conectores e webhook) com o mesmo motor da interface |
+| `src/vault.js` | Cofre: credenciais das conexões cifradas com AES-GCM |
 | `tests/selftest.js` | Os 18 cenários de teste obrigatórios |
 | `wrangler.jsonc` | Configuração do Cloudflare Workers (static assets) |
 
@@ -45,6 +49,19 @@ npx wrangler d1 migrations apply connext-intelligence --local
 npx wrangler dev --var DEV_USER:admin@teste.local --var BOOTSTRAP_ADMINS:admin@teste.local
 ```
 `DEV_USER` só existe em desenvolvimento local e substitui o login do Access.
+
+## Motor de IA e conexões (v0.3)
+
+- **Leitura de fontes:** o Claude Sonnet 5.5 recebe nomes de coluna, estatísticas e amostras mascaradas (nunca a base inteira) e devolve tipo de base, mapeamento com confiança e motivo, colunas sensíveis, sinais de funil e problemas de qualidade. A pessoa confirma antes de importar.
+- **Funil comercial:** regras resolvem status conhecidos (HubSpot, Salesforce e termos em português); o Claude Haiku 5.5 decide os casos com status desconhecido ou observações em texto livre, recebendo só sinais comerciais e um número no lugar do nome. Toda decisão grava etapa, motivo, confiança, modelo e assinatura dos sinais; muda de novo só quando o lead muda. Pessoas podem corrigir.
+- **Conexões:** webhook em `https://ingest.connextintelligence.com/in/{organização}/{conector}` (chave Bearer), Google Sheets (conta de serviço), HubSpot (token de app privado, incremental), Salesforce (client credentials, incremental), PostgreSQL e MySQL (SELECT somente leitura, coluna incremental opcional). Sincronização agendada a cada 15 minutos (cron).
+- **Orçamento:** limite mensal em US$ por organização; o servidor bloqueia chamadas acima dele. Consumo em `agent_executions`.
+
+### Segredos do Worker (configurados no painel da Cloudflare)
+| Nome | Conteúdo |
+|---|---|
+| `ANTHROPIC_API_KEY` | Chave da API do Claude |
+| `VAULT_KEY` | Frase aleatória longa; cifra as credenciais das conexões. Não trocar depois de criar conexões. |
 
 ## Testes
 

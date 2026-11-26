@@ -1,10 +1,14 @@
 {
   "name": "connext-intelligence",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Connext Intelligence Platform",
   "scripts": {
     "test": "node tests/selftest.js",
     "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "postgres": "3.4.5",
+    "mysql2": "3.11.5"
   }
 }

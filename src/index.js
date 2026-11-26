@@ -2,6 +2,12 @@
    Toda rota /api exige identidade validada pelo Cloudflare Access (JWT RS256) e associação ao tenant.
    O restante das rotas é servido pelos arquivos estáticos em /public. */
 
+import '../public/engine.js';
+import { analyzeSource, classifyStages, aiBudget } from './ai.js';
+import { TYPES, fetchBatch } from './connectors.js';
+import { seal, open, sha256 } from './vault.js';
+import { serverImport } from './ingest.js';
+
 const JSONH = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: JSONH });
 const fail = (status, error) => json({ ok: false, error }, status);
@@ -134,7 +140,8 @@ async function load(env, tid) {
     env.DB.prepare('SELECT COUNT(*) AS n FROM source_records WHERE tenant_id = ?').bind(tid).first()
   ]);
   const entities = await env.DB.prepare('SELECT id, sig FROM canonical_entities WHERE tenant_id = ?').bind(tid).all().then(r => r.results);
-  return { ok: true, tenant, sources, imports, decisions, candidates, mappings, snapshots, models, runs, results, cache, execs, segs, supp, erased, audit: auditRows, entities, records: count.n };
+  const stages = await env.DB.prepare('SELECT entity_id, stage, method, confidence, reason, sig, model, actor, at FROM lead_stages WHERE tenant_id = ?').bind(tid).all().then(r => r.results);
+  return { ok: true, stages, tenant, sources, imports, decisions, candidates, mappings, snapshots, models, runs, results, cache, execs, segs, supp, erased, audit: auditRows, entities, records: count.n };
 }
 
 /* ---------- sincronização ---------- */
@@ -153,7 +160,7 @@ async function sync(env, tid, email, role, body) {
     } else if (op.op === 'purge' && op.t === 'golden_profile_versions') {
       // eliminação de titular: remove todo o histórico de versões do perfil, que contém dados pessoais
       if (!can(role, 'govern')) { denied.push('histórico de perfil (eliminação)'); continue; }
-      for (const id of op.keys || []) stmts.push(env.DB.prepare('DELETE FROM golden_profile_versions WHERE tenant_id = ? AND entity_id = ?').bind(tid, id));
+      for (const id of op.keys || []) { stmts.push(env.DB.prepare('DELETE FROM golden_profile_versions WHERE tenant_id = ? AND entity_id = ?').bind(tid, id)); stmts.push(env.DB.prepare('DELETE FROM lead_stages WHERE tenant_id = ? AND entity_id = ?').bind(tid, id)); }
     } else if (op.op === 'delete') {
       const need = DELETE_NEED[op.t] || def.need || 'govern';
       if (op.t === 'audit_events' || !can(role, need)) { denied.push(op.t + ' (exclusão)'); continue; }
@@ -172,10 +179,53 @@ async function sync(env, tid, email, role, body) {
   return { ok: true, written: stmts.length, denied };
 }
 
+/* ---------- conectores ---------- */
+const pubConn = c => ({ id: c.id, type: c.type, type_label: (TYPES[c.type] || {}).label, name: c.name, source_id: c.source_id, config: JSON.parse(c.config_json || '{}'), has_secret: !!c.secret_enc, mapping: c.mapping_json ? JSON.parse(c.mapping_json) : null, status: c.status, cursor: c.cursor, schedule_minutes: c.schedule_minutes, last_sync_at: c.last_sync_at, last_result: c.last_result_json ? JSON.parse(c.last_result_json) : null, last_error: c.last_error, created_at: c.created_at, created_by: c.created_by });
+async function runConnector(env, tid, c, actor) {
+  const secret = c.secret_enc ? await open(env, c.secret_enc) : null;
+  const t0 = now(); let res;
+  try {
+    const data = await fetchBatch(c.type, JSON.parse(c.config_json || '{}'), secret, c.cursor);
+    const out = await serverImport(env, tid, c, data, c.name + ' · ' + new Date().toISOString().slice(0, 16).replace('T', ' '), actor);
+    res = Object.assign({ fetched: data.rows.length, more: !!data.more, ms: now() - t0 }, out);
+    await env.DB.prepare('UPDATE connectors SET cursor = ?, last_sync_at = ?, last_result_json = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(data.fullSnapshot ? c.cursor : (data.cursor || c.cursor), now(), JSON.stringify(res), tid, c.id).run();
+    return res;
+  } catch (e) {
+    await env.DB.prepare('UPDATE connectors SET last_sync_at = ?, last_error = ? WHERE tenant_id = ? AND id = ?').bind(now(), String(e.message || e).slice(0, 500), tid, c.id).run();
+    await audit(env, tid, actor, 'conector_falhou', c.name + ': ' + String(e.message || e).slice(0, 200), c.id);
+    throw e;
+  }
+}
+async function webhook(req, env, url) {
+  const [, , tid, cid] = url.pathname.split('/'); // /in/{tenant}/{conector}
+  if (req.method !== 'POST' || !tid || !cid) return fail(404, 'Use POST /in/{organização}/{conector}.');
+  const c = await env.DB.prepare('SELECT * FROM connectors WHERE tenant_id = ? AND id = ? AND type = ?').bind(tid, cid, 'webhook').first();
+  const auth = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '') || req.headers.get('x-connext-key') || '';
+  if (!c || !auth || (await sha256(auth)) !== c.key_hash) return fail(401, 'Chave de envio inválida.');
+  if (c.status !== 'ativo') return fail(423, 'Conector pausado.');
+  if (+(req.headers.get('content-length') || 0) > 2e6) return fail(413, 'Envie até 2 MB por requisição.');
+  let body; try { body = await req.json(); } catch (e) { return fail(400, 'Corpo precisa ser JSON.'); }
+  const list = Array.isArray(body) ? body : Array.isArray(body.records) ? body.records : [body];
+  if (list.length > 1000) return fail(413, 'Envie até 1.000 registros por requisição.');
+  const p = globalThis.CX.parseText('webhook.json', JSON.stringify(list));
+  try {
+    const out = await serverImport(env, tid, c, p, c.name + ' · webhook ' + new Date().toISOString().slice(0, 19).replace('T', ' '), 'conector:' + c.id);
+    await env.DB.prepare('UPDATE connectors SET last_sync_at = ?, last_result_json = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(now(), JSON.stringify(out), tid, c.id).run();
+    await usage(env, tid, 'POST webhook');
+    return json(Object.assign({ ok: true }, out), 202);
+  } catch (e) {
+    await env.DB.prepare('UPDATE connectors SET last_sync_at = ?, last_error = ? WHERE tenant_id = ? AND id = ?').bind(now(), String(e.message).slice(0, 500), tid, c.id).run();
+    return fail(e.status || 500, e.message);
+  }
+}
+
 /* ---------- roteador ---------- */
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+    // domínio de entrada: só recebe webhooks, sem interface e sem login do Access
+    if (url.pathname.startsWith('/in/')) return webhook(req, env, url);
+    if (url.hostname.startsWith('ingest.')) return fail(404, 'Endpoint de entrada: use POST /in/{organização}/{conector}.');
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(req);
     let user;
     try { user = await verifyAccess(req, env); } catch (e) { return fail(503, 'Falha ao validar a sessão de login: ' + e.message); }
@@ -249,6 +299,84 @@ export default {
           return json({ ok: true, rows, next: rows.length === limit ? rows[rows.length - 1].id : null });
         }
 
+        /* ----- motor de IA ----- */
+        if (sub === 'ai') {
+          const what = parts[4];
+          if (what === 'usage' && req.method === 'GET') {
+            const b = await aiBudget(env, tid);
+            const runs = (await env.DB.prepare('SELECT agent, model, at, input_tokens, output_tokens, cost FROM agent_executions WHERE tenant_id = ? ORDER BY at DESC LIMIT 50').bind(tid).all()).results;
+            return json({ ok: true, budget: b, runs });
+          }
+          if (!can(role, 'import') && !can(role, 'enrich')) return fail(403, 'Seu papel não permite usar o motor de IA.');
+          try {
+            if (what === 'analyze' && req.method === 'POST') return json(await analyzeSource(env, tid, user.email, await req.json()));
+            if (what === 'stages' && req.method === 'POST') return json(await classifyStages(env, tid, user.email, await req.json()));
+          } catch (e) { return fail(e.status || 500, e.message); }
+        }
+        if (sub === 'stages' && req.method === 'POST') {
+          if (!can(role, 'merge')) return fail(403, 'Seu papel não permite alterar etapas.');
+          const b = await req.json(), list = Array.isArray(b.items) ? b.items.slice(0, 500) : [];
+          const ok = ['novo', 'identificado', 'enriquecido', 'mql', 'sql', 'negociacao', 'cliente', 'descartado'];
+          const stmts = list.filter(x => x && x.entity_id && ok.includes(x.stage)).map(x => x.method === 'remover'
+            ? env.DB.prepare('DELETE FROM lead_stages WHERE tenant_id = ? AND entity_id = ?').bind(tid, x.entity_id)
+            : env.DB.prepare('INSERT OR REPLACE INTO lead_stages (tenant_id, entity_id, stage, method, confidence, reason, sig, model, actor, at) VALUES (?,?,?,?,?,?,?,?,?,?)').bind(tid, x.entity_id, x.stage, 'humano', 1, String(x.reason || 'Definido manualmente').slice(0, 240), x.sig || null, null, user.email, now()));
+          if (stmts.length) await env.DB.batch(stmts);
+          await audit(env, tid, user.email, 'etapa_definida', stmts.length + ' lead(s)');
+          return json({ ok: true, written: stmts.length });
+        }
+
+        /* ----- conectores ----- */
+        if (sub === 'connectors') {
+          const cid = parts[4], action = parts[5];
+          if (!cid && req.method === 'GET') {
+            const rows = (await env.DB.prepare('SELECT * FROM connectors WHERE tenant_id = ? ORDER BY created_at').bind(tid).all()).results;
+            return json({ ok: true, connectors: rows.map(pubConn), types: Object.fromEntries(Object.entries(TYPES).map(([k, v]) => [k, { label: v.label, secret: v.secret, fields: v.fields }])), ingest_base: 'https://' + (env.INGEST_HOST || 'ingest.connextintelligence.com') + '/in/' + tid + '/' });
+          }
+          if (!can(role, 'config')) return fail(403, 'Apenas administradores gerenciam conexões.');
+          if (!cid && req.method === 'POST') {
+            const b = await req.json();
+            if (!TYPES[b.type]) return fail(400, 'Tipo de conexão desconhecido.');
+            const srcRow = await env.DB.prepare('SELECT id FROM data_sources WHERE tenant_id = ? AND id = ?').bind(tid, b.source_id || '').first();
+            if (!srcRow) return fail(400, 'Escolha uma fonte cadastrada, com origem, base legal e finalidade.');
+            const id = 'cn_' + rid().slice(0, 10), cfg = {};
+            (TYPES[b.type].fields || []).forEach(([k]) => { if (b.config && b.config[k] != null) cfg[k] = String(b.config[k]).slice(0, 4000); });
+            let secretEnc = null, key = null, keyHash = null;
+            if (TYPES[b.type].secret) { if (!b.secret) return fail(400, 'Informe a credencial da conexão.'); secretEnc = await seal(env, String(b.secret)); }
+            if (b.type === 'webhook') { key = 'cx_' + rid() + rid(); keyHash = await sha256(key); }
+            await env.DB.prepare('INSERT INTO connectors (tenant_id, id, type, name, source_id, config_json, secret_enc, key_hash, status, schedule_minutes, created_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+              .bind(tid, id, b.type, String(b.name || TYPES[b.type].label).slice(0, 80), srcRow.id, JSON.stringify(cfg), secretEnc, keyHash, 'ativo', Math.max(15, Math.min(1440, +b.schedule_minutes || 60)), now(), user.email).run();
+            await audit(env, tid, user.email, 'conector_criado', TYPES[b.type].label + ' · ' + (b.name || ''), id);
+            return json({ ok: true, id, key, endpoint: b.type === 'webhook' ? 'https://' + (env.INGEST_HOST || 'ingest.connextintelligence.com') + '/in/' + tid + '/' + id : null });
+          }
+          const c = cid && await env.DB.prepare('SELECT * FROM connectors WHERE tenant_id = ? AND id = ?').bind(tid, cid).first();
+          if (!c) return fail(404, 'Conexão não encontrada.');
+          try {
+            if (action === 'test' && req.method === 'POST') {
+              if (c.type === 'webhook') return json({ ok: true, headers: [], rows: [], note: 'Webhook recebe dados por envio; teste enviando um registro para o endereço.' });
+              const data = await fetchBatch(c.type, JSON.parse(c.config_json || '{}'), await open(env, c.secret_enc), c.cursor, { sample: true });
+              await audit(env, tid, user.email, 'conector_testado', c.name + ' · ' + data.rows.length + ' linhas lidas', c.id);
+              return json({ ok: true, headers: data.headers, rows: data.rows.slice(0, 20), total: data.rows.length });
+            }
+            if (action === 'sync' && req.method === 'POST') return json(Object.assign({ ok: true }, await runConnector(env, tid, c, user.email)));
+            if (action === 'mapping' && req.method === 'POST') {
+              const b = await req.json(); const m = {}; Object.entries(b.mapping || {}).forEach(([h, f]) => { m[String(h).slice(0, 120)] = f && globalThis.CX.F[f] ? f : null; });
+              await env.DB.prepare('UPDATE connectors SET mapping_json = ? WHERE tenant_id = ? AND id = ?').bind(JSON.stringify(m), tid, cid).run();
+              await audit(env, tid, user.email, 'conector_mapeamento', c.name, c.id);
+              return json({ ok: true });
+            }
+            if (action === 'status' && req.method === 'POST') {
+              const b = await req.json(), st = b.status === 'pausado' ? 'pausado' : 'ativo';
+              await env.DB.prepare('UPDATE connectors SET status = ?, schedule_minutes = COALESCE(?, schedule_minutes) WHERE tenant_id = ? AND id = ?').bind(st, b.schedule_minutes ? Math.max(15, Math.min(1440, +b.schedule_minutes)) : null, tid, cid).run();
+              return json({ ok: true });
+            }
+            if (!action && req.method === 'DELETE') {
+              await env.DB.prepare('DELETE FROM connectors WHERE tenant_id = ? AND id = ?').bind(tid, cid).run();
+              await audit(env, tid, user.email, 'conector_excluido', c.name, c.id);
+              return json({ ok: true });
+            }
+          } catch (e) { return fail(e.status || 500, e.message); }
+        }
+
         if (sub === 'raw-delete' && req.method === 'POST') {
           if (!can(role, 'govern')) return fail(403, 'Seu papel não permite excluir arquivos brutos.');
           const imp = String(url.searchParams.get('import') || '').replace(/[^\w.-]/g, '');
@@ -261,5 +389,11 @@ export default {
     } catch (e) {
       return fail(500, 'Erro no servidor: ' + (e && e.message || e));
     }
+  },
+
+  // sincronização agendada dos conectores de leitura (Google Sheets, HubSpot, Salesforce, bancos)
+  async scheduled(event, env, ctx) {
+    const due = (await env.DB.prepare("SELECT * FROM connectors WHERE status = 'ativo' AND type != 'webhook' AND (last_sync_at IS NULL OR last_sync_at + schedule_minutes * 60000 <= ?) ORDER BY last_sync_at LIMIT 5").bind(now()).all()).results;
+    for (const c of due) ctx.waitUntil(runConnector(env, c.tenant_id, c, 'agendador').catch(() => {}));
   }
 };

@@ -34,6 +34,9 @@ CX.FIELDS = [
   { k: 'state', label: 'UF', cat: 'Localização', sens: 'baixo', ttl: 730, syn: ['uf', 'estado', 'state'] },
   { k: 'cep', label: 'CEP', cat: 'Localização', sens: 'pessoal', ttl: 730, syn: ['cep', 'zip', 'postalcode', 'codigopostal'] },
   { k: 'consent', label: 'Consentimento de contato', cat: 'Privacidade', sens: 'governança', ttl: 730, syn: ['consentimento', 'optin', 'aceite', 'aceitelgpd', 'lgpd', 'consent'] },
+  { k: 'lead_status', label: 'Status no funil (origem)', cat: 'Comercial', sens: 'comercial', ttl: 180, syn: ['status', 'etapa', 'estagio', 'fase', 'situacao', 'lifecyclestage', 'leadstatus', 'hsleadstatus', 'statusdolead', 'etapadofunil', 'stage', 'pipeline', 'dealstage', 'statuscomercial'] },
+  { k: 'notes', label: 'Observações', cat: 'Comercial', sens: 'pessoal', ttl: 365, syn: ['observacoes', 'observacao', 'obs', 'notas', 'nota', 'comentarios', 'comentario', 'anotacoes', 'notes', 'description', 'descricao', 'historico'] },
+  { k: 'last_interaction', label: 'Última interação', cat: 'Comercial', sens: 'baixo', ttl: 0, syn: ['ultimocontato', 'ultimainteracao', 'dataultimocontato', 'lastactivity', 'lastactivitydate', 'lastcontacted', 'noteslastcontacted', 'ultimaatividade', 'hslastsalesactivitytimestamp'] },
   { k: 'created_at', label: 'Data de captura', cat: 'Metadado', sens: 'baixo', ttl: 0, syn: ['data', 'datacadastro', 'createdat', 'criadoem', 'datacaptura', 'timestamp', 'dtcadastro'] }
 ];
 CX.F = {}; CX.FIELDS.forEach(f => CX.F[f.k] = f);
@@ -129,7 +132,9 @@ function nDate(v) { const t = parseDate(v); if (isNaN(t) || t > CX.now() + DAY |
 function nSite(v) { const s = String(v).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, ''); return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s) ? R(s, true, 'valid', 'domínio com sintaxe válida') : R(s, false, 'invalid', 'domínio inválido'); }
 function nBool(v) { const s = norm(v); if (['sim', 's', 'yes', 'y', 'true', '1', 'optin', 'aceito'].includes(s)) return R('sim', true, 'valid', ''); if (['nao', 'n', 'no', 'false', '0', 'optout', 'recusado'].includes(s)) return R('não', true, 'valid', ''); return R(String(v).trim(), false, 'invalid', 'valor não booleano'); }
 function nText(v) { const s = String(v).replace(/\s+/g, ' ').trim(); if (INJECTION.test(s)) return R(s, false, 'invalid', 'conteúdo instrucional tratado como dado'); return TESTNAME.test(norm(s)) ? R(s, false, 'test', 'valor técnico') : R(s, true, 'valid', ''); }
-const NORMALIZERS = { full_name: nName, org_name: nOrg, email: nEmail, phone: nPhone, cpf: nCPF, cnpj: nCNPJ, cep: nCEP, state: nUF, birth_date: nDate, created_at: nDate, website: nSite, consent: nBool };
+function nLong(v) { const s = String(v).replace(/\s+/g, ' ').trim().slice(0, 2000); if (!s) return R(s, false, 'invalid', 'vazio'); if (INJECTION.test(s)) return R(s, false, 'invalid', 'conteúdo instrucional tratado como dado'); return R(s, true, 'valid', ''); }
+function nStatus(v) { const s = String(v).replace(/\s+/g, ' ').trim().slice(0, 120); if (!s || TESTNAME.test(norm(s))) return R(s, false, 'invalid', 'status vazio ou técnico'); return R(s, true, 'valid', ''); }
+const NORMALIZERS = { full_name: nName, org_name: nOrg, email: nEmail, phone: nPhone, cpf: nCPF, cnpj: nCNPJ, cep: nCEP, state: nUF, birth_date: nDate, created_at: nDate, last_interaction: nDate, website: nSite, consent: nBool, notes: nLong, lead_status: nStatus };
 CX.normalize = (field, v) => (NORMALIZERS[field] || nText)(v);
 CX.makeCPF = n => { const b = String(n).padStart(9, '0'); const d1 = cpfDV(b); return b + d1 + cpfDV(b + d1); };
 CX.makeCNPJ = n => { const b = String(n).padStart(8, '0') + '0001'; const d1 = cnpjDV(b); return b + d1 + cnpjDV(b + d1); };
@@ -266,14 +271,50 @@ CX.suggestMapping = function (t, headers, rows) {
   };
 };
 
+/* ---------- funil comercial ---------- */
+CX.STAGES = [['novo', 'Novo'], ['identificado', 'Identificado'], ['enriquecido', 'Enriquecido'], ['mql', 'Qualificado (MQL)'], ['sql', 'Pronto para contato (SQL)'], ['negociacao', 'Em negociação'], ['cliente', 'Cliente'], ['descartado', 'Descartado']];
+CX.STAGE = {}; CX.STAGES.forEach(s => CX.STAGE[s[0]] = s[1]);
+const STATUS_MAP = [
+  [/^(subscriber|assinante|lead|novo|new|open|aberto|nao contatado|nao trabalhado|entrada)$/, 'novo'],
+  [/(marketingqualified|^mql$|qualificado marketing|lead qualificado|^qualificado$)/, 'mql'],
+  [/(salesqualified|^sql$|reuniao agendada|agendado|demo agendada|contatado|em contato|working|attempted to contact|connected)/, 'sql'],
+  [/(opportunity|oportunidade|negociac|proposta|in progress|em andamento|open deal|qualification|needs analysis)/, 'negociacao'],
+  [/(customer|cliente|ganho|closed won|fechado ganho|evangelist|contratado|ativo pagante)/, 'cliente'],
+  [/(perdido|lost|closed lost|fechado perdido|descartad|desqualificad|unqualified|bad timing|sem interesse|invalido|spam|other)/, 'descartado']
+];
+CX.mapStatus = function (v) { const n = norm(v); if (!n) return null; for (const [re, st] of STATUS_MAP) if (re.test(n)) return st; return null; };
+// Regra determinística: resolve os casos claros e marca para a IA os que dependem de texto livre.
+CX.stageRule = function (p) {
+  const F = k => p.fields[k] && !p.fields[k].synthetic ? p.fields[k].value : null;
+  const status = F('lead_status'), notes = F('notes'), last = F('last_interaction');
+  const sig = hash([status || '', notes || '', last || '', p.level, p.scores.qualification >= 60, p.elig.sales_contact || p.elig.marketing_contact].join('|'));
+  const r = (stage, confidence, reason, needsAI) => ({ stage, confidence, reason, needsAI: !!needsAI, method: 'regra', sig });
+  if (p.suppressed) return r('descartado', 0.95, 'Canal em supressão por oposição do titular');
+  if (p.level === 0) return r('descartado', 0.9, 'Nenhum identificador válido');
+  if (status) { const m = CX.mapStatus(status); if (m) return r(m, 0.9, 'Status de origem "' + String(status).slice(0, 40) + '"'); }
+  let base;
+  if (p.level <= 1) base = r('novo', 0.7, 'Só um identificador válido');
+  else if (p.scores.qualification >= 60 && p.scores.contactability >= 50 && (p.elig.sales_contact || p.elig.marketing_contact)) base = r('mql', 0.7, 'Perfil aderente ao ICP e contatável');
+  else if (p.enriched || p.level >= 3) base = r('enriquecido', 0.75, 'Dados completos para a fase ' + 'L' + p.level);
+  else base = r('identificado', 0.75, 'Nome e canal válidos');
+  if (status || notes) { base.needsAI = true; base.confidence = 0.4; base.reason += status ? '; status "' + String(status).slice(0, 40) + '" sem correspondência' : '; há observações para interpretar'; }
+  return base;
+};
+CX.resolveStage = function (t, p) {
+  const rule = CX.stageRule(p), saved = t.stages && t.stages[p.id];
+  if (saved && (saved.method === 'humano' || saved.sig === rule.sig)) return Object.assign({ needsAI: false }, saved);
+  return rule;
+};
+
 /* ---------- tenant ---------- */
 CX.defaultConfig = () => ({
   version: 1, dqi: { completeness: 30, validity: 25, confidence: 20, freshness: 15, traceability: 10 }, autoT: 0.82, reviewT: 0.55,
   icp: { segments: ['Tecnologia', 'Logística', 'Saúde'], states: ['SP', 'RJ', 'MG'], titles: ['diretor', 'gerente', 'head', 'ceo', 'cto', 'coordenador'], corpEmail: true },
   budget: { enrichMonthly: 150 }, retentionDays: 730,
-  workflows: { autoPipeline: true, reviewOnConflict: true, revalidateOnExpiry: true, internalEnrichOnImport: false }
+  workflows: { autoPipeline: true, reviewOnConflict: true, revalidateOnExpiry: true, internalEnrichOnImport: false, autoStageAI: false },
+  ai: { enabled: true, monthlyBudgetUSD: 20 }
 });
-CX.newTenant = (id, name) => ({ id, name, salt: hash('salt:' + id), seq: 0, sources: [], imports: [], records: [], decisions: { merge: {}, reject: {}, split: {} }, suppression: {}, enrich: [], enrichRuns: [], cache: {}, audit: [], mappings: {}, snapshots: [], erased: [], segments: [], executions: [], modelVersions: [], config: CX.defaultConfig(), spend: 0, cacheHits: 0, derived: null });
+CX.newTenant = (id, name) => ({ id, name, salt: hash('salt:' + id), seq: 0, sources: [], imports: [], records: [], decisions: { merge: {}, reject: {}, split: {} }, suppression: {}, enrich: [], enrichRuns: [], cache: {}, audit: [], mappings: {}, snapshots: [], erased: [], segments: [], executions: [], modelVersions: [], stages: {}, config: CX.defaultConfig(), spend: 0, cacheHits: 0, derived: null });
 CX.createStore = () => ({ tenants: {} });
 CX.access = function (store, actor, tenantId) {
   if (!actor || actor.tenant_id !== tenantId) { const t = store.tenants[actor && actor.tenant_id]; if (t) CX.audit(t, actor.user || 'desconhecido', 'acesso_negado', 'tentativa de acesso a outro tenant'); throw new Error('403 · acesso negado: tenant diferente do contexto autenticado'); }
@@ -453,7 +494,7 @@ CX.rebuild = function (t) {
   // vínculos pessoa -> organização
   const orgIdx = new Map(); profiles.forEach(p => { if (p.type === 'organization' && p.fields.org_name) orgIdx.set(orgKey(p.fields.org_name.value), p); });
   profiles.forEach(p => { if (p.type === 'person' && p.fields.org_name) { const o = orgIdx.get(orgKey(p.fields.org_name.value)); if (o) { p.org_id = o.id; (o.members = o.members || []).push(p.id); } } });
-  const byId = {}; profiles.forEach(p => byId[p.id] = p);
+  const byId = {}; profiles.forEach(p => { byId[p.id] = p; p.stage = CX.resolveStage(t, p); });
   const avg = {}; ['completeness', 'validity', 'confidence', 'freshness', 'traceability', 'dqi', 'qualification', 'contactability'].forEach(k => avg[k] = profiles.length ? Math.round(profiles.reduce((s, p) => s + p.scores[k], 0) / profiles.length) : 0);
   const candidates = Array.from(cands.values()).sort((a, b) => b.score - a.score);
   t.derived = { profiles, byId, recToEnt, candidates, autoMerges: merged.length, duplicates: n - profiles.length, fieldStats, avg, oversized, ms: Date.now() - t0, at: now };
@@ -542,8 +583,8 @@ CX.correctField = function (t, entId, field, value, actor) {
 CX.publishModel = function (t, patch, actor) { t.modelVersions.push({ version: t.config.version, at: CX.now(), dqi: Object.assign({}, t.config.dqi), icp: JSON.parse(JSON.stringify(t.config.icp)), avg: t.derived ? t.derived.avg.dqi : 0 }); Object.assign(t.config, patch); t.config.version++; CX.audit(t, actor, 'modelo_scoring_publicado', 'v' + t.config.version); CX.rebuild(t); t.executions.push({ id: 'wf_' + (t.idp || '') + (t.executions.length + 1), kind: 'Recalcular indicadores', trigger: 'Novo modelo de pontuação publicado', ref: 'v' + t.config.version, at: CX.now(), state: 'concluído', attempts: 1, ms: t.derived.ms, cost: 0, detail: t.derived.profiles.length + ' perfis' }); };
 
 /* ---------- segmentação ---------- */
-CX.SEGFIELDS = { level: ['Nível (L0 a L5)', 'num'], dqi: ['Data Quality Index', 'num'], qualification: ['Qualification Score', 'num'], contactability: ['Contactability Score', 'num'], freshness: ['Freshness Score', 'num'], completeness: ['Completeness Score', 'num'], entity_type: ['Tipo de entidade', 'txt'], segment: ['Segmento empresarial', 'txt'], state: ['UF', 'txt'], city: ['Cidade', 'txt'], job_title: ['Cargo', 'txt'], source: ['Fonte', 'txt'], email_type: ['Tipo de e-mail', 'txt'] };
-const segVal = (p, f) => f === 'level' ? p.level : (p.scores[f] !== undefined ? p.scores[f] : f === 'entity_type' ? (p.type === 'person' ? 'pessoa' : 'organização') : f === 'source' ? p.sources.join(' ') : f === 'email_type' ? (p.fields.email ? (FREE.has(p.fields.email.value.split('@')[1]) ? 'gratuito' : 'corporativo') : '') : (p.fields[f] && !p.fields[f].synthetic ? p.fields[f].value : ''));
+CX.SEGFIELDS = { level: ['Nível (L0 a L5)', 'num'], dqi: ['Data Quality Index', 'num'], qualification: ['Qualification Score', 'num'], contactability: ['Contactability Score', 'num'], freshness: ['Freshness Score', 'num'], completeness: ['Completeness Score', 'num'], entity_type: ['Tipo de entidade', 'txt'], segment: ['Segmento empresarial', 'txt'], state: ['UF', 'txt'], city: ['Cidade', 'txt'], job_title: ['Cargo', 'txt'], source: ['Fonte', 'txt'], email_type: ['Tipo de e-mail', 'txt'], stage: ['Etapa do funil', 'txt'] };
+const segVal = (p, f) => f === 'stage' ? (p.stage ? p.stage.stage : '') : f === 'level' ? p.level : (p.scores[f] !== undefined ? p.scores[f] : f === 'entity_type' ? (p.type === 'person' ? 'pessoa' : 'organização') : f === 'source' ? p.sources.join(' ') : f === 'email_type' ? (p.fields.email ? (FREE.has(p.fields.email.value.split('@')[1]) ? 'gratuito' : 'corporativo') : '') : (p.fields[f] && !p.fields[f].synthetic ? p.fields[f].value : ''));
 CX.evalSegment = function (t, seg) {
   const out = { ids: [], matched: 0, excluded: { finalidade: 0, supressao: 0 } };
   const test = (p, r) => { const v = segVal(p, r.field), x = r.value; if (CX.SEGFIELDS[r.field][1] === 'num') { const a = +v, b = +x; return r.cmp === '>=' ? a >= b : r.cmp === '<=' ? a <= b : r.cmp === '=' ? a === b : a !== b; } const a = norm(v), b = norm(x); return r.cmp === '=' ? a === b : r.cmp === '!=' ? a !== b : r.cmp === 'contém' ? a.includes(b) : false; };
@@ -557,7 +598,7 @@ CX.evalSegment = function (t, seg) {
 };
 CX.aggregate = function (t) {
   const d = t.derived, lv = [0, 0, 0, 0, 0, 0], el = { analytics: 0, enrichment: 0, marketing_contact: 0, sales_contact: 0 }; d.profiles.forEach(p => { lv[p.level]++; for (const k in el) if (p.elig[k]) el[k]++; });
-  return { registros_recebidos: t.records.length, entidades_unicas: d.profiles.length, duplicatas_consolidadas: d.duplicates, candidatos_em_revisao: d.candidates.length, medias: d.avg, distribuicao_niveis: lv, elegiveis_por_finalidade: el, campos: Object.fromEntries(Object.entries(d.fieldStats).filter(e => e[1].assertions).map(([k, s]) => [k, s])), fontes: t.sources.map(s => ({ id: s.id, nome: s.name, confiabilidade: s.reliability, base_legal: s.legal_basis, finalidades: s.purposes })), gasto_enriquecimento: t.spend, orcamento: t.config.budget.enrichMonthly };
+  return { registros_recebidos: t.records.length, entidades_unicas: d.profiles.length, duplicatas_consolidadas: d.duplicates, candidatos_em_revisao: d.candidates.length, medias: d.avg, distribuicao_niveis: lv, elegiveis_por_finalidade: el, campos: Object.fromEntries(Object.entries(d.fieldStats).filter(e => e[1].assertions).map(([k, s]) => [k, s])), fontes: t.sources.map(s => ({ id: s.id, nome: s.name, confiabilidade: s.reliability, base_legal: s.legal_basis, finalidades: s.purposes })), gasto_enriquecimento: t.spend, orcamento: t.config.budget.enrichMonthly, funil: CX.STAGES.map(s => [s[1], d.profiles.filter(p => p.stage && p.stage.stage === s[0]).length]) };
 };
 
 /* ---------- dados de demonstração (sintéticos) ---------- */
@@ -644,6 +685,7 @@ CX.selfTest = function () {
   T('16 · Reprocessamento idempotente', () => { const t = mk(), csv = 'nome,email\nAna Lima,ana@acme.example\nBia Souza,bia@acme.example'; imp(t, csv, 'a.csv'); const n = t.records.length, r2 = imp(t, csv, 'a.csv'); return { ok: r2.skipped === true && t.records.length === n, detail: 'segunda importação reconhecida pelo hash do arquivo' }; });
   T('17 · Reconstrução do Golden Record', () => { const t = mk(); imp(t, 'nome,email,telefone\nAna Lima,ana@acme.example,(11) 98888-7777\nAna Lima,ana@acme.example,\nBia Souza,bia@acme.example,(21) 97777-6666'); CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['ddd_uf']); const s1 = CX.signature(t); t.derived = null; CX.rebuild(t); return { ok: CX.signature(t) === s1, detail: 'perfis idênticos após reconstrução a partir de registros, decisões e evidências' }; });
   T('18 · Registro de custos e auditoria', () => { const t = mk(); t.config.budget.enrichMonthly = 10; imp(t, 'nome,email\nAna Lima,ana@acme.example'); const run = CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['demo_b2b']); const p = t.derived.profiles[0]; return { ok: run.cost === 0.35 && t.spend === 0.35 && t.audit.some(a => a.action === 'enriquecimento_executado') && p.fields.job_title.synthetic === true && p.scores.completeness === 36, detail: 'custo R$ 0,35 registrado, valor sintético fora dos indicadores' }; });
+  T('19 · Classificação de etapa do funil', () => { const t = mk(); imp(t, 'nome,email,status,observacoes\nAna Lima,ana@acme.example,Closed Won,\nBia Souza,bia@acme.example,Proposta enviada,\nCaio Dias,caio@acme.example,,Pediu retorno em março\nDani Reis,dani@acme.example,,'); const st = n => t.derived.profiles.find(p => p.name === n).stage; return { ok: st('Ana Lima').stage === 'cliente' && st('Bia Souza').stage === 'negociacao' && st('Caio Dias').needsAI && !st('Dani Reis').needsAI, detail: 'regras resolvem status conhecidos; observações livres vão para a IA' }; });
   return out;
 };
 

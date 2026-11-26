@@ -150,6 +150,7 @@ async function loadTenant(id, role, onProgress) {
   d.supp.forEach(s => { t.suppression[s.key_hash] = { type: s.channel, at: s.at, reason: s.reason }; });
   t.erased = d.erased.map(e => ({ id: e.id, ref: e.ref_hash, records: e.records, at: e.at, actor: e.actor }));
   t.audit = d.audit.map(a => ({ id: a.id, at: a.at, actor: a.actor, action: a.action, detail: a.detail, ref: a.ref }));
+  (d.stages || []).forEach(x => { t.stages[x.entity_id] = { stage: x.stage, method: x.method, confidence: x.confidence, reason: x.reason, sig: x.sig, model: x.model, actor: x.actor, at: x.at }; });
   let after = '', got = 0;
   while (true) {
     const r = await call('GET', '/t/' + encodeURIComponent(id) + '/records?limit=5000&after=' + encodeURIComponent(after));
@@ -183,6 +184,14 @@ root.CXSync = {
   setMember: (tid, email, role) => call('POST', '/t/' + encodeURIComponent(tid) + '/members', { email, role }),
   removeMember: (tid, email) => call('DELETE', '/t/' + encodeURIComponent(tid) + '/members/' + encodeURIComponent(email)),
   uploadRaw: (tid, imp, name, bytes) => call('POST', '/t/' + encodeURIComponent(tid) + '/raw?import=' + encodeURIComponent(imp) + '&name=' + encodeURIComponent(name), undefined, bytes),
+  connectors: tid => call('GET', '/t/' + encodeURIComponent(tid) + '/connectors'),
+  createConnector: (tid, body) => call('POST', '/t/' + encodeURIComponent(tid) + '/connectors', body),
+  connectorAction: (tid, cid, action, body) => call('POST', '/t/' + encodeURIComponent(tid) + '/connectors/' + encodeURIComponent(cid) + '/' + action, body || {}),
+  deleteConnector: (tid, cid) => call('DELETE', '/t/' + encodeURIComponent(tid) + '/connectors/' + encodeURIComponent(cid)),
+  analyze: (tid, body) => call('POST', '/t/' + encodeURIComponent(tid) + '/ai/analyze', body),
+  classify: (tid, items) => call('POST', '/t/' + encodeURIComponent(tid) + '/ai/stages', { items }),
+  setStages: (tid, items) => call('POST', '/t/' + encodeURIComponent(tid) + '/stages', { items }),
+  aiUsage: tid => call('GET', '/t/' + encodeURIComponent(tid) + '/ai/usage'),
   deleteRaw: (tid, imp) => call('POST', '/t/' + encodeURIComponent(tid) + '/raw-delete?import=' + encodeURIComponent(imp))
 };
 })(typeof window !== 'undefined' ? window : globalThis);
