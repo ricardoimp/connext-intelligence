@@ -55,6 +55,14 @@ CX.inferType = function (vals) {
   if (share(/^(sim|nao|não|s|n|true|false|0|1|yes|no)$/i) >= 0.8) return 'sim/não';
   return 'texto';
 };
+// nome digitado ou sugerido -> campo que já existe na base (canônico ou personalizado), para nunca duplicar
+const NAME_ALIAS = { primeironome: 'full_name', sobrenome: 'full_name', ultimonome: 'full_name', nome: 'full_name', firstname: 'full_name', lastname: 'full_name', surname: 'full_name', email: 'email', emails: 'email', telefone: 'phone', celular: 'phone', whatsapp: 'phone', fone: 'phone' };
+CX.matchFieldByName = function (t, name) {
+  const c = compact(name || ''); if (!c) return null;
+  for (const f of CX.FIELDS) if (compact(f.label) === c || f.syn.includes(c)) return f.k;
+  if (NAME_ALIAS[c]) return NAME_ALIAS[c];
+  const cf = ((t && t.customFields) || []).find(x => compact(x.label) === c || x.k === CX.customKey(name)); return cf ? cf.k : null;
+};
 CX.addCustomField = function (t, label, actor, ctx) {
   t.customFields = t.customFields || []; label = String(label || '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Campo';
   const k = (ctx && ctx.k) || CX.customKey(label), ex = CX.customField(t, k); if (ex) return ex;
@@ -285,6 +293,8 @@ CX.suggestMapping = function (t, headers, rows) {
       let pat = null, pc = 0;
       if (vals.length) for (const k of PATTERN_ORDER) { const share = vals.filter(v => CX.normalize(k, v).valid).length / vals.length; if (share >= 0.6 && share * 0.9 > pc + 0.02) { pc = share * 0.9; pat = k; } }
       if (pat === 'created_at' && syn === 'birth_date') pat = 'birth_date';
+      // nomes de pessoas sem cabeçalho: palavras alfabéticas, sem dígitos, com boa variedade de valores
+      if (!pat && !syn && vals.length >= 2) { const nm = vals.filter(v => /^[A-Za-zÀ-ÖØ-öø-ÿ'´`.-]{2,}( [A-Za-zÀ-ÖØ-öø-ÿ'´`.-]+){0,5}$/.test(String(v).trim()) && String(v).length <= 60).length / vals.length, dist = new Set(vals.map(v => norm(v))).size / vals.length; if (nm >= 0.85 && dist >= 0.5) { pat = 'full_name'; pc = 0.62; } }
       let field = null, confidence = 0, basis = 'sem correspondência';
       if (syn && pat && syn === pat) { field = syn; confidence = Math.min(0.99, 1 - (1 - sc) * (1 - pc)); basis = 'nome da coluna e padrão dos valores'; }
       else if (pat && pc >= 0.72 && (!syn || NORMALIZERS[syn] && syn !== 'full_name' && syn !== 'org_name')) { field = pat; confidence = syn ? pc * 0.85 : pc; basis = syn ? 'padrão dos valores (nome da coluna sugere outro campo)' : 'padrão dos valores'; }
@@ -721,6 +731,7 @@ CX.selfTest = function () {
   T('17 · Reconstrução do Golden Record', () => { const t = mk(); imp(t, 'nome,email,telefone\nAna Lima,ana@acme.example,(11) 98888-7777\nAna Lima,ana@acme.example,\nBia Souza,bia@acme.example,(21) 97777-6666'); CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['ddd_uf']); const s1 = CX.signature(t); t.derived = null; CX.rebuild(t); return { ok: CX.signature(t) === s1, detail: 'perfis idênticos após reconstrução a partir de registros, decisões e evidências' }; });
   T('18 · Registro de custos e auditoria', () => { const t = mk(); t.config.budget.enrichMonthly = 10; imp(t, 'nome,email\nAna Lima,ana@acme.example'); const run = CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['demo_b2b']); const p = t.derived.profiles[0]; return { ok: run.cost === 0.35 && t.spend === 0.35 && t.audit.some(a => a.action === 'enriquecimento_executado') && p.fields.job_title.synthetic === true && p.scores.completeness === 36, detail: 'custo R$ 0,35 registrado, valor sintético fora dos indicadores' }; });
   T('19 · Classificação de etapa do funil', () => { const t = mk(); imp(t, 'nome,email,status,observacoes\nAna Lima,ana@acme.example,Closed Won,\nBia Souza,bia@acme.example,Proposta enviada,\nCaio Dias,caio@acme.example,,Pediu retorno em março\nDani Reis,dani@acme.example,,'); const st = n => t.derived.profiles.find(p => p.name === n).stage; return { ok: st('Ana Lima').stage === 'cliente' && st('Bia Souza').stage === 'negociacao' && st('Caio Dias').needsAI && !st('Dani Reis').needsAI, detail: 'regras resolvem status conhecidos; observações livres vão para a IA' }; });
+  T('22 · Nome de coluna ligado ao campo da base', () => { const t = mk(); CX.addCustomField(t, 'MAC', 'teste'); const p = CX.parseText('s.csv', 'Eric,Silva,eric@acme.example\nLeticia,Chuder,leticia@acme.example\nCris,Alves,cris@acme.example'); const sug = CX.suggestMapping(t, p.headers, p.rows); const m = n => CX.matchFieldByName(t, n); return { ok: m('Primeiro nome') === 'full_name' && m('E-mail') === 'email' && m('Celular') === 'phone' && m('mac') === 'x_mac' && m('Local de captura') === null && sug.cols[0].field === 'full_name' && sug.cols[1].field === 'full_name' && sug.cols[2].field === 'email', detail: 'nomes e colunas sem cabeçalho reconhecidos como campos existentes, sem criar duplicados' }; });
   T('21 · Primeiro nome e sobrenome em colunas separadas', () => { const t = mk(), p = CX.parseText('n.csv', 'Eric,Silva,eric@acme.example\nLeticia,Chuder,leticia@acme.example'); CX.importSync(t, { sourceId: t.sources[0].id, fileName: 'n.csv', fileHash: 'h21', format: 'CSV', encoding: 'UTF-8', at: CX.now(), actor: 'teste', mapping: { 0: 'full_name', 1: 'full_name', 2: 'email' }, headerMap: {}, sig: 'y' }, p.rows); const names = t.derived.profiles.map(x => x.name).sort(); return { ok: names[0] === 'Eric Silva' && names[1] === 'Leticia Chuder' && p.headers[0] === 'coluna_1', detail: 'arquivo sem cabeçalho reconhecido e colunas de nome unidas em Nome completo' }; });
   T('20 · Campo personalizado criado na importação', () => {
     const csv = 'Nome,E-mail,MAC\nAna Lima,ana@acme.example,06:BA:9F:E2:91:18\nAna Lima,ana@acme.example,0A:3B:93:93:83:E1\nBia Souza,bia@acme.example,22:05:14:35:2F:6A';

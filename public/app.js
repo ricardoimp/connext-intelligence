@@ -407,7 +407,10 @@ function stageImport(name, parsed, ms, bytes, mime) {
 }
 function nextInQueue() { S.imp = null; const f = S.queue.shift(); if (f) loadFile(f); else rerender(); }
 async function runImport() {
-  if (!guard('import')) return; const t = T(), im = S.imp, headerMap = {}; im.sug.cols.forEach(c => headerMap[c.header] = im.mapping[c.col] || null);
+  if (!guard('import')) return; const t = T(), im = S.imp, headerMap = {};
+  // coluna marcada como campo novo mas cujo nome já existe na base: usa o campo existente
+  im.sug.cols.forEach(c => { const k = im.mapping[c.col]; if (isNewField(t, k)) { const ex = CX.matchFieldByName(t, dispName(t, c, im.names, im.mapping)); if (ex) im.mapping[c.col] = ex; } });
+ im.sug.cols.forEach(c => headerMap[c.header] = im.mapping[c.col] || null);
   const b = CX.beginImport(t, { sourceId: im.sourceId, fileName: im.name, fileHash: im.parsed.fileHash, format: im.parsed.format, encoding: im.parsed.encoding, bytes: im.parsed.bytes, actor: actor(), mapping: im.mapping, headerMap, columnNames: Object.fromEntries(im.sug.cols.map(c => [c.col, dispName(t, c, im.names, im.mapping)])), sig: im.sug.sig, parseErrors: im.parsed.errors, total: im.parsed.rows.length, msExtract: im.ms });
   if (b.blocked || b.skipped) { toast(b.reason, b.blocked); if (b.skipped) nextInQueue(); return; }
   if (t.remote) {
@@ -507,7 +510,7 @@ function setTenant(id) { const nt = store.tenants[id]; if (nt && nt.remote) S.ro
 const CH = {
   fSource: v => S.f.source = v, fType: v => S.f.type = v, fLevel: v => S.f.level = v, fDays: v => S.f.days = +v, tenant: v => { setTenant(v); return false; }, role: v => { S.role = v; },
   impSource: v => S.imp.sourceId = v,
-  colName: (v, el) => { const im = S.imp, t = T(), col = +el.dataset.col, c = im.sug.cols[col], before = dispName(t, c, im.names, im.mapping); im.names[col] = String(v).replace(/\s+/g, ' ').trim().slice(0, 60); const after = dispName(t, c, im.names, im.mapping); if (isNewField(t, im.mapping[col]) && im.mapping[col] === CX.customKey(before)) im.mapping[col] = CX.customKey(after); }, map: (v, el) => { S.imp.mapping[el.dataset.col] = v || null; const c = S.imp.sug.cols[+el.dataset.col]; c.ambiguous = false; c.basis = isNewField(T(), v) ? 'campo novo criado pelo usuário' : 'confirmado pelo usuário'; },
+  colName: (v, el) => { const im = S.imp, t = T(), col = +el.dataset.col, c = im.sug.cols[col], before = dispName(t, c, im.names, im.mapping); im.names[col] = String(v).replace(/\s+/g, ' ').trim().slice(0, 60); const ex = CX.matchFieldByName(t, im.names[col]); if (ex) { im.mapping[col] = ex; c.basis = 'nome corresponde a um campo da base'; c.ambiguous = false; delete im.names[col]; toast('"' + String(v).trim() + '" já existe na base como ' + CX.fieldLabel(t, ex) + '. A coluna foi ligada a esse campo.'); return; } const after = dispName(t, c, im.names, im.mapping); if (isNewField(t, im.mapping[col]) && im.mapping[col] === CX.customKey(before)) im.mapping[col] = CX.customKey(after); }, map: (v, el) => { S.imp.mapping[el.dataset.col] = v || null; const c = S.imp.sug.cols[+el.dataset.col]; c.ambiguous = false; c.basis = isNewField(T(), v) ? 'campo novo criado pelo usuário' : 'confirmado pelo usuário'; },
   sort: v => S.sort = v, segPurpose: v => S.seg.purpose = v, segOp: v => S.seg.op = v,
   stagePick: v => { if (v) setStage(v); return false; },
   connType: v => { S.connType = v; }, cmap: (v, el) => { if (S.connTest) S.connTest.mapping[el.dataset.h] = v || null; return !CX.isCustom(v) ? false : undefined; },
@@ -638,20 +641,19 @@ const isGeneric = h => /^coluna_\d+$/.test(String(h || '').trim());
 // nome exibido da coluna: digitado pela pessoa > (cabeçalho genérico: sugerido pela IA > campo reconhecido) > cabeçalho original
 function dispName(t, c, names, mapping) {
   if (names && names[c.col] != null && String(names[c.col]).trim()) return String(names[c.col]).trim();
-  if (!isGeneric(c.header)) return c.header;
-  if (c.aiName && !isGeneric(c.aiName)) return c.aiName;
   const f = mapping && mapping[c.col]; if (f && !isNewField(t, f)) return CX.fieldLabel(t, f);
+  if (isGeneric(c.header) && c.aiName && !isGeneric(c.aiName)) return c.aiName;
   return c.header;
 }
 function fieldOptions(t, cur, header) {
-  const cf = t.customFields || [], nk = CX.customKey(header), exists = cf.some(c => c.k === nk), o = (v, l) => `<option value="${esc(v)}" ${cur === v ? 'selected' : ''}>${esc(l)}</option>`;
+  const cf = t.customFields || [], nk = CX.customKey(header), exists = cf.some(c => c.k === nk) || !!CX.matchFieldByName(t, header), o = (v, l) => `<option value="${esc(v)}" ${cur === v ? 'selected' : ''}>${esc(l)}</option>`;
   return `<option value="">Não importar</option><optgroup label="Campos canônicos">${CX.FIELDS.map(f => o(f.k, f.label)).join('')}</optgroup>${cf.length ? `<optgroup label="Campos personalizados">${cf.map(c => o(c.k, c.label)).join('')}</optgroup>` : ''}${exists ? '' : `<optgroup label="Campo novo">${o(nk, '+ Criar campo "' + String(header).slice(0, 40) + '"')}</optgroup>`}`;
 }
 const isNewField = (t, k) => CX.isCustom(k) && !CX.customField(t, k);
 function applyAI(ai, cols, mapping, key) {
   ai.columns.forEach(a => { const c = cols.find(x => x.col === a.index); if (!c) return; if (a.suggested_name) c.aiName = String(a.suggested_name).trim().slice(0, 60);
     if (a.sensitive) { mapping[key(c)] = null; c.sensitive = true; c.basis = 'CONNEXT IA marcou como dado sensível: não importado'; return; }
-    if (a.field === 'novo_campo') { if (!mapping[key(c)] && a.confidence >= 0.6) { mapping[key(c)] = CX.customKey(isGeneric(c.header) && c.aiName ? c.aiName : c.header); c.field = mapping[key(c)]; c.confidence = a.confidence; c.basis = 'CONNEXT IA sugeriu criar um campo novo'; c.ambiguous = true; } return; }
+    if (a.field === 'novo_campo') { const nm0 = isGeneric(c.header) && c.aiName ? c.aiName : c.header, ex = CX.matchFieldByName(T(), nm0); if (!mapping[key(c)] && a.confidence >= 0.6) { mapping[key(c)] = ex || CX.customKey(nm0); c.field = mapping[key(c)]; c.confidence = a.confidence; c.basis = 'CONNEXT IA sugeriu criar um campo novo'; c.ambiguous = true; } return; }
     if (a.field !== 'none' && a.confidence >= 0.6 && (!mapping[key(c)] || (c.confidence || 0) < 0.7)) { mapping[key(c)] = a.field; c.field = a.field; c.confidence = a.confidence; c.basis = 'sugerido pela CONNEXT IA'; c.ambiguous = a.confidence < 0.75; } });
 }
 async function analyzeImport() {
