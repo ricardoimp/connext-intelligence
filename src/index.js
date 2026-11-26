@@ -288,7 +288,7 @@ export default {
           const imp = q('import').replace(/[^\w.-]/g, ''), name = q('name').replace(/[^\w.\- ]/g, '_').slice(0, 120) || 'arquivo', sid = q('source'), aid = q('analysis').replace(/[^\w]/g, '');
           if (!imp) return fail(400, 'Importação não informada.');
           const an = await env.DB.prepare('SELECT id, result_json FROM ai_analyses WHERE tenant_id = ? AND id = ?').bind(tid, aid).first();
-          if (!an) return fail(409, 'O arquivo precisa ser analisado pelo Claude antes de gravar.');
+          if (!an) return fail(409, 'O arquivo precisa ser analisado pela CONNEXT IA antes de gravar.');
           const src = await env.DB.prepare('SELECT * FROM data_sources WHERE tenant_id = ? AND id = ?').bind(tid, sid).first();
           if (!src) return fail(409, 'Escolha a fonte de dados do arquivo antes de gravar.');
           const miss = globalThis.CX.sourcePolicy({ origin: src.origin, legal_basis: src.legal_basis, purposes: JSON.parse(src.purposes_json || '[]') });

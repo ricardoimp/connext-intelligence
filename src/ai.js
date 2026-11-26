@@ -19,7 +19,7 @@ export async function aiBudget(env, tid) {
 
 async function claude(env, tid, actor, agent, model, system, user, schema, maxTokens) {
   const b = await aiBudget(env, tid);
-  if (!b.configured) throw Object.assign(new Error('A chave da API do Claude ainda não foi configurada no servidor (segredo ANTHROPIC_API_KEY).'), { status: 412 });
+  if (!b.configured) throw Object.assign(new Error('A chave do provedor da CONNEXT IA ainda não foi configurada no servidor (segredo ANTHROPIC_API_KEY).'), { status: 412 });
   if (!b.enabled) throw Object.assign(new Error('O motor de IA está desligado para esta organização.'), { status: 412 });
   if (b.spent >= b.budget) throw Object.assign(new Error('Orçamento mensal de IA atingido (US$ ' + b.spent.toFixed(2) + ' de US$ ' + b.budget.toFixed(2) + '). Ajuste em Administration.'), { status: 402 });
   let data, usage, used = model;
@@ -31,9 +31,9 @@ async function claude(env, tid, actor, agent, model, system, user, schema, maxTo
       body: JSON.stringify({ model, max_tokens: maxTokens || 4000, system, messages: [{ role: 'user', content: user }], output_config: { format: { type: 'json_schema', schema } } })
     });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw Object.assign(new Error('Claude respondeu ' + r.status + ': ' + ((j.error && j.error.message) || 'erro desconhecido')), { status: 502 });
+    if (!r.ok) throw Object.assign(new Error('O provedor da CONNEXT IA respondeu ' + r.status + ': ' + ((j.error && j.error.message) || 'erro desconhecido')), { status: 502 });
     const block = (j.content || []).find(c => c.type === 'text');
-    if (!block) throw Object.assign(new Error('Claude não devolveu conteúdo estruturado (motivo: ' + j.stop_reason + ').'), { status: 502 });
+    if (!block) throw Object.assign(new Error('A CONNEXT IA não devolveu conteúdo estruturado (motivo: ' + j.stop_reason + ').'), { status: 502 });
     data = JSON.parse(block.text); usage = j.usage || {}; used = j.model || model;
   }
   const p = PRICE[model] || [0, 0], cost = ((usage.input_tokens || 0) * p[0] + (usage.output_tokens || 0) * p[1]) / 1e6;
