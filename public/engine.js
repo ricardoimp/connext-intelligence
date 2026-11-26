@@ -372,6 +372,43 @@ CX.sourcePolicy = function (src) {
 const kkey = (t, type, v) => type + ':' + hash(t.salt + '|' + type + '|' + v);
 CX.identityKey = kkey;
 
+/* ---------- consolidação de sessões por pessoa ----------
+   Registros de acesso (Wi-Fi, portal, app) repetem a mesma pessoa em muitas linhas. A consolidação gera uma linha por
+   pessoa: chave = primeiro identificador válido (e-mail, CPF, telefone, ID na origem ou identificador de dispositivo),
+   valor mais recente não vazio de cada coluna, quantidade de sessões, primeira sessão (Data de captura) e última
+   sessão (Última interação). O arquivo original completo continua guardado. */
+CX.consolidationKeys = function (t, mapping) {
+  const keys = [];
+  ['email', 'cpf', 'phone', '@id_origem'].forEach(f => Object.keys(mapping).forEach(c => { if (mapping[c] === f) keys.push({ c: +c, f }); }));
+  Object.keys(mapping).forEach(c => { const k = mapping[c], cf = CX.isCustom(k) ? CX.customField(t, k) : null; if (CX.isCustom(k) && (/^x_mac/.test(k) || (cf && /identificador/.test(cf.type)))) keys.push({ c: +c, f: k }); });
+  return keys;
+};
+CX.Consolidator = function (t, mapping) {
+  const keys = CX.consolidationKeys(t, mapping), cols = Object.keys(mapping).filter(c => mapping[c]).map(Number);
+  const dateCol = Object.keys(mapping).find(c => mapping[c] === 'created_at'), lastCol = Object.keys(mapping).find(c => mapping[c] === 'last_interaction');
+  const groups = new Map(), loose = []; let seen = 0, byKey = {};
+  const keyOf = row => { for (const k of keys) { const v = row[k.c]; if (v === '' || v == null) continue; if (k.f === 'email' || k.f === 'cpf' || k.f === 'phone') { const n = CX.normalize(k.f, v); if (n.valid) return [k.f, k.f + ':' + n.value]; } else { const s = norm(v).replace(/[^a-z0-9]/g, ''); if (s.length >= 4) return [k.f, k.f + ':' + s]; } } return null; };
+  return {
+    keys, ok: keys.length > 0,
+    add(row) {
+      seen++; const k = keyOf(row); if (!k) { loose.push(row); return; }
+      let g = groups.get(k[1]); const d = dateCol != null ? parseDate(row[dateCol]) : NaN;
+      if (!g) { g = { row: row.slice(), n: 0, min: NaN, max: NaN, minRaw: '', maxRaw: '' }; groups.set(k[1], g); byKey[k[0]] = (byKey[k[0]] || 0) + 1; }
+      else if (isNaN(d) || isNaN(g.max) || d >= g.max) for (const c of cols) { const v = row[c]; if (v !== '' && v != null) g.row[c] = v; }  // valor da sessão mais recente vence
+      else for (const c of cols) { if ((g.row[c] === '' || g.row[c] == null) && row[c] !== '' && row[c] != null) g.row[c] = row[c]; }  // sessão antiga só completa lacunas
+      g.n++;
+      if (!isNaN(d)) { if (isNaN(g.min) || d < g.min) { g.min = d; g.minRaw = row[dateCol]; } if (isNaN(g.max) || d >= g.max) { g.max = d; g.maxRaw = row[dateCol]; } }
+    },
+    result(width) {
+      const out = [], extra = { count: width, last: lastCol == null && dateCol != null ? width + 1 : null };
+      groups.forEach(g => { const r = g.row.slice(0, width); while (r.length < width) r.push(''); if (dateCol != null && g.minRaw) r[dateCol] = g.minRaw; r.push(String(g.n)); if (extra.last != null) r.push(g.maxRaw || ''); out.push(r); });
+      loose.forEach(row => { const r = row.slice(0, width); while (r.length < width) r.push(''); r.push('1'); if (extra.last != null) r.push(dateCol != null ? row[dateCol] || '' : ''); out.push(r); });
+      const m = Object.assign({}, mapping); m[extra.count] = 'x_sessoesnaorigem'; if (extra.last != null) m[extra.last] = 'last_interaction';
+      return { rows: out, mapping: m, people: groups.size, loose: loose.length, seen, byKey, extra };
+    }
+  };
+};
+
 /* ---------- importação ---------- */
 CX.beginImport = function (t, m) {
   const src = t.sources.find(s => s.id === m.sourceId), miss = CX.sourcePolicy(src);
@@ -738,6 +775,7 @@ CX.selfTest = function () {
   T('17 · Reconstrução do Golden Record', () => { const t = mk(); imp(t, 'nome,email,telefone\nAna Lima,ana@acme.example,(11) 98888-7777\nAna Lima,ana@acme.example,\nBia Souza,bia@acme.example,(21) 97777-6666'); CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['ddd_uf']); const s1 = CX.signature(t); t.derived = null; CX.rebuild(t); return { ok: CX.signature(t) === s1, detail: 'perfis idênticos após reconstrução a partir de registros, decisões e evidências' }; });
   T('18 · Registro de custos e auditoria', () => { const t = mk(); t.config.budget.enrichMonthly = 10; imp(t, 'nome,email\nAna Lima,ana@acme.example'); const run = CX.runEnrichment(t, t.derived.profiles.map(p => p.id), ['demo_b2b']); const p = t.derived.profiles[0]; return { ok: run.cost === 0.35 && t.spend === 0.35 && t.audit.some(a => a.action === 'enriquecimento_executado') && p.fields.job_title.synthetic === true && p.scores.completeness === 36, detail: 'custo R$ 0,35 registrado, valor sintético fora dos indicadores' }; });
   T('19 · Classificação de etapa do funil', () => { const t = mk(); imp(t, 'nome,email,status,observacoes\nAna Lima,ana@acme.example,Closed Won,\nBia Souza,bia@acme.example,Proposta enviada,\nCaio Dias,caio@acme.example,,Pediu retorno em março\nDani Reis,dani@acme.example,,'); const st = n => t.derived.profiles.find(p => p.name === n).stage; return { ok: st('Ana Lima').stage === 'cliente' && st('Bia Souza').stage === 'negociacao' && st('Caio Dias').needsAI && !st('Dani Reis').needsAI, detail: 'regras resolvem status conhecidos; observações livres vão para a IA' }; });
+  T('25 · Consolidação de sessões por pessoa', () => { const t = mk(); CX.addCustomField(t, 'MAC', 'teste', { type: 'identificador de dispositivo' }); const p = CX.parseText('s.csv', 'Ana Lima,ana@acme.example,AA:BB:CC:DD:EE:01,01/05/2026 10:00\nAna Lima,ana@acme.example,AA:BB:CC:DD:EE:01,03/05/2026 09:00\n,,AA:BB:CC:DD:EE:02,02/05/2026 08:00\n,,AA:BB:CC:DD:EE:02,04/05/2026 08:00\nAna,ana@acme.example,AA:BB:CC:DD:EE:01,02/05/2026 12:00'); const cx = CX.Consolidator(t, { 0: 'full_name', 1: 'email', 2: 'x_mac', 3: 'created_at' }); p.rows.forEach(r => cx.add(r)); const res = cx.result(4); const ana = res.rows.find(r => r[1] === 'ana@acme.example'); return { ok: res.rows.length === 2 && ana[4] === '3' && ana[3] === '01/05/2026 10:00' && ana[5] === '03/05/2026 09:00' && ana[0] === 'Ana Lima' && res.mapping[4] === 'x_sessoesnaorigem' && res.mapping[5] === 'last_interaction', detail: '5 sessões viram 2 pessoas, com contagem, primeira e última sessão' }; });
   T('24 · Consentimento por canal', () => { const t = mk(); const p = CX.parseText('c.csv', 'nome,email,lgpd_email,lgpd_whatsapp\nAna Lima,ana@acme.example,false,true\nBia Souza,bia@acme.example,false,false'); CX.importSync(t, { sourceId: t.sources[0].id, fileName: 'c.csv', fileHash: 'h24', format: 'CSV', encoding: 'UTF-8', at: CX.now(), actor: 'teste', mapping: { 0: 'full_name', 1: 'email', 2: 'consent', 3: 'consent' }, headerMap: {}, sig: 'w' }, p.rows); const c = n => t.derived.profiles.find(x => x.name === n).fields.consent.value; return { ok: c('Ana Lima') === 'sim' && c('Bia Souza') === 'não' && !t.derived.profiles.some(x => x.conflicts.includes('consent')), detail: 'colunas de consentimento por canal unidas: basta um canal autorizado, sem conflito' }; });
   T('23 · Proprietário e fonte na tag de origem', () => { const t = mk(); t.sources[0].owner = 'Alpha FM'; const p = CX.parseText('a.json', JSON.stringify([{ id: 'u1', proprietario: 'Alpha FM', fonte: 'crm_ouvintes', nome: 'Ana Lima', email: 'ana@acme.example', updated_at: '2026-11-26T03:15:00Z' }])); const ix = h => p.headers.indexOf(h); const mapping = {}; mapping[ix('id')] = '@id_origem'; mapping[ix('proprietario')] = '@proprietario'; mapping[ix('fonte')] = '@fonte'; mapping[ix('nome')] = 'full_name'; mapping[ix('email')] = 'email'; mapping[ix('updated_at')] = '@atualizado_origem'; CX.importSync(t, { sourceId: t.sources[0].id, fileName: 'a.json', fileHash: 'h23', format: 'JSON', encoding: 'UTF-8', at: CX.now(), actor: 'teste', mapping, headerMap: {}, sig: 'z' }, p.rows); const o = t.records[0].origin; return { ok: o.proprietario === 'Alpha FM' && o.fonte === 'crm_ouvintes' && o.id_origem === 'u1' && o.atualizado_origem === '2026-11-26T03:15:00Z' && !t.records[0].f.x_idorigem, detail: 'proprietário, fonte, ID e data de atualização da origem gravados na tag de cada registro' }; });
   T('22 · Nome de coluna ligado ao campo da base', () => { const t = mk(); CX.addCustomField(t, 'MAC', 'teste'); const p = CX.parseText('s.csv', 'Eric,Silva,eric@acme.example\nLeticia,Chuder,leticia@acme.example\nCris,Alves,cris@acme.example'); const sug = CX.suggestMapping(t, p.headers, p.rows); const m = n => CX.matchFieldByName(t, n); return { ok: m('Primeiro nome') === 'full_name' && m('E-mail') === 'email' && m('Celular') === 'phone' && m('mac') === 'x_mac' && m('Local de captura') === null && sug.cols[0].field === 'full_name' && sug.cols[1].field === 'full_name' && sug.cols[2].field === 'email', detail: 'nomes e colunas sem cabeçalho reconhecidos como campos existentes, sem criar duplicados' }; });

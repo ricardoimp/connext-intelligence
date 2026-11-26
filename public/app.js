@@ -180,10 +180,11 @@ V.import = () => {
     <div class="row"><label>Fonte de destino <select data-ch="impSource"><option value="" disabled ${!im.sourceId ? 'selected' : ''}>Selecione a fonte</option>${t.sources.filter(s => s.id !== 'src_manual').map(s => `<option value="${s.id}" ${s.id === im.sourceId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label><a class="btn sm" href="#sources">Cadastrar fonte</a>${!t.sources.length ? chip('cadastre uma fonte antes de importar', 'crit') : !src ? chip('selecione a fonte de destino antes de importar', 'warn') : miss.length ? chip('bloqueada pela política: falta ' + miss.join(', '), 'crit') : chip('origem, base legal e finalidade conferidas', 'good')}</div>
     ${amb || sens ? `<div class="note">${amb ? amb + ' coluna(s) com mapeamento ambíguo: confirme antes de importar. ' : ''}${sens ? sens + ' coluna(s) com atributo sensível foram excluídas da importação.' : ''}</div>` : ''}
     ${t.remote ? decisionPanel(t, im) : ''}
+    ${p.rows.length >= 20000 ? (() => { const ks = CX.consolidationKeys(t, im.mapping); return `<div class="note ${im.consolidate ? 'info' : 'warn'}"><label class="row" style="gap:8px"><input type="checkbox" data-ch="impConsol" ${im.consolidate ? 'checked' : ''}><b>Consolidar sessões por pessoa</b> ${chip(fmt(p.rows.length) + ' linhas', 'plain')}</label><p style="margin:6px 0 0">Arquivos de acesso repetem a mesma pessoa em muitas linhas. Com esta opção, entra um registro por pessoa, com a quantidade de sessões (campo "Sessões na origem"), a primeira sessão como Data de captura e a última como Última interação. O arquivo original completo fica guardado com o comprovante.</p><p class="muted" style="margin:4px 0 0">Chave da pessoa, nesta ordem: ${ks.length ? ks.map(k => esc(CX.fieldLabel(t, k.f))).join(' › ') : '<span class="down">nenhuma coluna de identificação mapeada (e-mail, telefone, CPF, ID na origem ou MAC)</span>'}. Limite por importação no plano atual do banco: ${fmt(MAX_IMPORT)} registros.</p>${S.consolBusy ? `<p class="mono" id="consol-p" style="margin:6px 0 0">${fmt(S.consolBusy.done)} de ${fmt(S.consolBusy.n)} linhas consolidadas</p>` : ''}</div>`; })() : ''}
     ${tbl(['Coluna do arquivo', 'Amostras', 'Campo canônico', 'Confiança', 'Base da sugestão'].concat(im.ai ? ['Leitura da CONNEXT IA'] : []), im.sug.cols.map(c => { const nm = dispName(t, c, im.names, im.mapping); return `<tr><td style="min-width:170px"><input type="text" class="colname" data-ch="colName" data-col="${c.col}" value="${esc(nm)}" maxlength="60" aria-label="Nome da coluna" title="Clique para renomear">${nm !== c.header ? `<div class="muted" style="font-size:11px;margin-top:3px">original: <span class="mono">${esc(c.header)}</span>${im.names[c.col] ? ' · nome manual' : ' · nome reconhecido'}</div>` : ''}</td><td class="mono muted">${c.samples.map(s => esc(String(s).slice(0, 34))).join('<br>') || 'vazia'}</td><td>${c.sensitive ? chip('sensível, não importado', 'crit') : `<select data-ch="map" data-col="${c.col}">${fieldOptions(t, im.mapping[c.col] || '', nm)}</select>${isNewField(t, im.mapping[c.col]) ? `<div style="margin-top:4px">${chip('campo novo: será criado na base ao importar', 'info')}</div>` : CX.isCustom(im.mapping[c.col]) ? `<div style="margin-top:4px">${chip('campo personalizado', 'plain')}</div>` : ''}`}</td><td style="min-width:110px">${c.field ? `<div class="row"><span class="mono">${Math.round(c.confidence * 100)}%</span>${meter(c.confidence * 100, c.ambiguous ? 'var(--warn)' : 'var(--good)')}</div>` : '<span class="muted">n/d</span>'}</td><td class="muted">${esc(c.basis)}${c.ambiguous ? ' ' + chip('confirmar', 'warn') : ''}</td>${im.ai ? aiCell(im.ai, c.col) : ''}</tr>`; }))}
     <details><summary>Prévia das 6 primeiras linhas</summary>${tbl(p.headers.map(esc), p.rows.slice(0, 6).map(r => `<tr>${r.map(c => `<td class="mono">${esc(String(c).slice(0, 40))}</td>`).join('')}</tr>`))}</details>
     ${p.errors.length ? `<details><summary>${p.errors.length} linhas com problema estrutural</summary>${tbl(['n:Linha', 'Problema', 'Conteúdo'], p.errors.slice(0, 50).map(e => `<tr><td class="n">${e.row}</td><td>${esc(e.msg)}</td><td class="mono muted">${esc(e.raw || '')}</td></tr>`))}<p class="muted">Corrija essas linhas no arquivo e reenvie: o hash muda e só as linhas novas geram registros adicionais na mesma fonte após a resolução de identidade.</p></details>` : ''}
-    <div class="row"><button class="btn pri" data-act="runImport" ${miss.length || !Object.values(im.mapping).some(Boolean) || (t.remote && !im.ai) ? 'disabled' : ''}>${t.remote && !im.ai ? 'Aguardando a análise da CONNEXT IA' : 'Importar ' + fmt(p.rows.length) + ' linhas'}</button><button class="btn" data-act="discard">Descartar</button>${S.queue.length ? `<span class="muted">${S.queue.length} arquivo(s) na fila</span>` : ''}</div></div>`;
+    <div class="row"><button class="btn pri" data-act="runImport" ${(t.remote && !im.ai) || S.consolBusy || S.importing ? 'disabled' : ''}>${t.remote && !im.ai ? 'Aguardando a análise da CONNEXT IA' : S.consolBusy ? 'Consolidando…' : im.consolidate ? 'Consolidar e importar' : 'Importar ' + fmt(p.rows.length) + ' linhas'}</button><button class="btn" data-act="discard">Descartar</button>${S.queue.length ? `<span class="muted">${S.queue.length} arquivo(s) na fila</span>` : ''}</div></div>`;
   }
   return `<div class="grid">${card('c12', 'Upload e mapeamento', 'detecção de formato, codificação, delimitador, tipos e atributos sensíveis', body)}
   ${S.impOpen && t.imports.find(i => i.id === S.impOpen) ? provenanceCard(t.imports.find(i => i.id === S.impOpen)) : ''}
@@ -401,30 +402,56 @@ async function loadFile(file) {
 }
 function stageImport(name, parsed, ms, bytes, mime) {
   const t = T(), sug = CX.suggestMapping(t, parsed.headers, parsed.rows), mapping = {}; sug.cols.forEach(c => { if (c.field) mapping[c.col] = c.field; });
-  const srcs = t.sources.filter(s => s.id !== 'src_manual'); S.imp = { name, parsed, sug, mapping, names: {}, sourceId: '', ms, bytes };
+  const srcs = t.sources.filter(s => s.id !== 'src_manual'); S.imp = { name, parsed, sug, mapping, names: {}, sourceId: '', ms, bytes, consolidate: parsed.rows.length >= 50000 };
   if (location.hash !== '#import') location.hash = 'import'; else render();
   if (t.remote) setTimeout(analyzeImport, 50);
 }
 function nextInQueue() { S.imp = null; const f = S.queue.shift(); if (f) loadFile(f); else rerender(); }
 async function runImport() {
   if (!guard('import')) return; const t = T(), im = S.imp, headerMap = {};
+  // o que falta para importar: explica em vez de não fazer nada
+  const src0 = t.sources.find(s => s.id === im.sourceId), why = [];
+  if (!src0) why.push('selecione a fonte de destino no topo do quadro');
+  else { const m0 = CX.sourcePolicy(src0); if (m0.length) why.push('a fonte "' + src0.name + '" está sem ' + m0.join(', ') + ' (corrija em Data Sources)'); }
+  if (!Object.values(im.mapping).some(Boolean)) why.push('mapeie ao menos uma coluna');
+  if (t.remote && !im.ai) why.push('aguarde a leitura da CONNEXT IA terminar');
+  if (why.length) { toast('Para importar: ' + why.join('; ') + '.', true); const sel = $('select[data-ch=impSource]'); if (!src0 && sel) { sel.scrollIntoView({ block: 'center' }); sel.focus(); } return; }
+  if (S.importing) return; S.importing = true;
+  try { await runImportInner(t, im, headerMap); } finally { S.importing = false; }
+}
+const MAX_IMPORT = 250000; // limite por importação no plano atual do banco (D1 gratuito: 500 MB)
+async function runImportInner(t, im, headerMap) {
   // coluna marcada como campo novo mas cujo nome já existe na base: usa o campo existente
   im.sug.cols.forEach(c => { const k = im.mapping[c.col]; if (isNewField(t, k)) { const ex = CX.matchFieldByName(t, dispName(t, c, im.names, im.mapping)); if (ex) im.mapping[c.col] = ex; } });
  im.sug.cols.forEach(c => headerMap[c.header] = im.mapping[c.col] || null);
-  const b = CX.beginImport(t, { sourceId: im.sourceId, fileName: im.name, fileHash: im.parsed.fileHash, format: im.parsed.format, encoding: im.parsed.encoding, bytes: im.parsed.bytes, actor: actor(), mapping: im.mapping, headerMap, columnNames: Object.fromEntries(im.sug.cols.map(c => [c.col, dispName(t, c, im.names, im.mapping)])), sig: im.sug.sig, parseErrors: im.parsed.errors, total: im.parsed.rows.length, msExtract: im.ms });
+  // arquivo de sessões: uma linha por pessoa antes de gravar
+  let rows = im.parsed.rows, mapping = im.mapping, consol = null;
+  if (im.consolidate) {
+    const cx = CX.Consolidator(t, im.mapping);
+    if (!cx.ok) return toast('Para consolidar por pessoa, mapeie uma coluna de e-mail, telefone, CPF, ID na origem ou identificador de dispositivo (MAC).', true);
+    const src = im.parsed.rows, n = src.length, w = im.parsed.headers.length; S.consolBusy = { done: 0, n }; rerender();
+    for (let i = 0; i < n; i += 50000) { for (let j = i; j < Math.min(n, i + 50000); j++) cx.add(src[j]); S.consolBusy.done = Math.min(n, i + 50000); const el = $('#consol-p'); if (el) el.textContent = fmt(S.consolBusy.done) + ' de ' + fmt(n) + ' linhas consolidadas'; await new Promise(r => setTimeout(r, 0)); }
+    const res = cx.result(w); S.consolBusy = null; rows = res.rows; mapping = res.mapping;
+    consol = { linhas_no_arquivo: n, pessoas: res.people, sem_identificador: res.loose, chaves: res.byKey };
+    toast(fmt(n) + ' linhas consolidadas em ' + fmt(rows.length) + ' registros (' + fmt(res.people) + ' pessoas identificadas' + (res.loose ? ', ' + fmt(res.loose) + ' linhas sem identificador' : '') + ').');
+  }
+  if (rows.length > MAX_IMPORT) { rerender(); return toast('Este arquivo geraria ' + fmt(rows.length) + ' registros, acima do limite de ' + fmt(MAX_IMPORT) + ' por importação no plano atual do banco. ' + (im.consolidate ? 'Divida o arquivo por período.' : 'Ative "Consolidar sessões por pessoa" ou divida o arquivo por período.'), true); }
+  const b = CX.beginImport(t, { sourceId: im.sourceId, fileName: im.name, fileHash: im.parsed.fileHash, format: im.parsed.format, encoding: im.parsed.encoding, bytes: im.parsed.bytes, actor: actor(), mapping, headerMap, columnNames: Object.fromEntries(im.sug.cols.map(c => [c.col, dispName(t, c, im.names, im.mapping)])), sig: im.sug.sig, parseErrors: im.parsed.errors, total: rows.length, msExtract: im.ms });
+  if (b.job && consol) b.job.consolidation = consol;
   if (b.blocked || b.skipped) { toast(b.reason, b.blocked); if (b.skipped) nextInQueue(); return; }
   if (t.remote) {
     if (!im.ai) { CX.cancelImport(t, b.job, actor()); t.imports.pop(); return toast('O arquivo precisa ser analisado pela CONNEXT IA antes de gravar.', true); }
-    toast('Registrando o arquivo: comprovante de origem e cópia original.');
+    const big = (im.bytes ? im.bytes.byteLength : 0) > 40 * 1024 * 1024; toast(big ? 'Enviando o arquivo original em partes (' + fmt(Math.round(im.bytes.byteLength / 1048576)) + ' MB) e registrando o comprovante de origem.' : 'Registrando o arquivo: comprovante de origem e cópia original.');
     try {
-      const r = await CXSync.registerFile(t.id, { import: b.job.id, name: im.name, source: im.sourceId, analysis: im.ai.id, hash: im.parsed.fileHash, decision: { recomendacao: im.ai.recommendation.action, escolha: im.decision || 'importar', mapeamento: im.mapping } }, im.bytes || new TextEncoder().encode(JSON.stringify(im.parsed.rows)));
+      const r = await CXSync.registerFile(t.id, { import: b.job.id, name: im.name, source: im.sourceId, analysis: im.ai.id, hash: im.parsed.fileHash, decision: { recomendacao: im.ai.recommendation.action, escolha: im.decision || 'importar', mapeamento: im.mapping, consolidacao: consol } }, im.bytes || new TextEncoder().encode(JSON.stringify(im.parsed.rows)), (i, n) => toast('Arquivo original: parte ' + i + ' de ' + n + ' enviada.'));
       b.job.provenance = r.provenance; b.job.raw_key = r.key; b.job.raw_sha256 = r.provenance.sha256; b.job.ai_analysis_id = im.ai.id; b.job.origin.ip = r.provenance.ip; b.job.decision = { recomendacao: im.ai.recommendation.action, escolha: im.decision || 'importar', por: S.me };
     } catch (e) { CX.cancelImport(t, b.job, actor()); t.imports.splice(t.imports.indexOf(b.job), 1); return toast('Importação não iniciada: ' + e.message, true); }
   }
   // colunas mapeadas para campo novo: a definição do campo é criada na base antes de gravar os valores
   const created = []; im.sug.cols.forEach(c => { const k = im.mapping[c.col]; if (isNewField(t, k)) created.push(CX.addCustomField(t, dispName(t, c, im.names, im.mapping), actor(), { k, column: c.header, samples: im.parsed.rows.slice(0, 200).map(r => r[c.col]), source_id: im.sourceId, import_id: b.job.id }).label); });
+  if (consol && !CX.customField(t, 'x_sessoesnaorigem')) created.push(CX.addCustomField(t, 'Sessões na origem', actor(), { k: 'x_sessoesnaorigem', type: 'número', column: 'contagem de linhas por pessoa', source_id: im.sourceId, import_id: b.job.id }).label);
   if (created.length) toast('Campo(s) novo(s) criado(s) na base: ' + created.join(', ') + '.');
-  const rows = im.parsed.rows, total = rows.length, chunk = Math.max(250, Math.min(5000, Math.ceil(total / 30)));
+  const total = rows.length, chunk = Math.max(250, Math.min(5000, Math.ceil(total / 30)));
   S.run = { job: b.job, total, paused: false, cancelled: false }; rerender();
   const step = () => {
     const r = S.run; if (!r) return; if (r.cancelled) { CX.cancelImport(t, r.job, actor()); S.run = null; toast('Importação cancelada. Nenhum registro parcial permaneceu.'); rerender(); return; }
@@ -512,6 +539,7 @@ function setTenant(id) { const nt = store.tenants[id]; if (nt && nt.remote) S.ro
 const CH = {
   fSource: v => S.f.source = v, fType: v => S.f.type = v, fLevel: v => S.f.level = v, fDays: v => S.f.days = +v, tenant: v => { setTenant(v); return false; }, role: v => { S.role = v; },
   impSource: v => S.imp.sourceId = v,
+  impConsol: (v, el) => { S.imp.consolidate = el.checked; },
   colName: (v, el) => { const im = S.imp, t = T(), col = +el.dataset.col, c = im.sug.cols[col], before = dispName(t, c, im.names, im.mapping); im.names[col] = String(v).replace(/\s+/g, ' ').trim().slice(0, 60); const ex = CX.matchFieldByName(t, im.names[col]); if (ex) { im.mapping[col] = ex; c.basis = 'nome corresponde a um campo da base'; c.ambiguous = false; delete im.names[col]; toast('"' + String(v).trim() + '" já existe na base como ' + CX.fieldLabel(t, ex) + '. A coluna foi ligada a esse campo.'); return; } const after = dispName(t, c, im.names, im.mapping); if (isNewField(t, im.mapping[col]) && im.mapping[col] === CX.customKey(before)) im.mapping[col] = CX.customKey(after); }, map: (v, el) => { S.imp.mapping[el.dataset.col] = v || null; const c = S.imp.sug.cols[+el.dataset.col]; c.ambiguous = false; c.basis = isNewField(T(), v) ? 'campo novo criado pelo usuário' : 'confirmado pelo usuário'; },
   sort: v => S.sort = v, segPurpose: v => S.seg.purpose = v, segOp: v => S.seg.op = v,
   stagePick: v => { if (v) setStage(v); return false; },
@@ -733,7 +761,7 @@ function decisionPanel(t, im) {
   return aiPanel(ai, false, 'analyzeImport') + `<div class="note ${rc[1] === 'crit' ? 'crit' : rc[1] === 'good' ? 'info' : ''}" style="margin-top:8px"><div class="row"><b>O que fazer com este arquivo?</b>${chip(rc[0], rc[1])}</div><p style="margin:6px 0">${esc(ai.recommendation.reason)}</p>
   ${ai.questions.length ? `<p style="margin:6px 0 2px"><b>Perguntas da CONNEXT IA</b></p><ol style="margin:0 0 6px 18px;padding:0">${ai.questions.slice(0, 4).map(q => `<li>${esc(q)}</li>`).join('')}</ol>` : ''}
   <p style="margin:6px 0"><b>Fonte de dados:</b> ${src ? esc(src.name) + ' · ' + esc(src.origin || '') : '<span class="down">nenhuma escolhida</span>'}${sug && sug.id !== im.sourceId ? ` · a CONNEXT IA acha que a origem é <b>${esc(sug.name)}</b> <button class="btn sm" data-act="useSource" data-id="${sug.id}">Usar esta fonte</button>` : ''}</p>
-  <div class="row"><button class="btn pri" data-act="impDecide" data-d="importar" ${!src ? 'disabled' : ''}>Importar conforme a análise</button><button class="btn" data-act="impDecide" data-d="importar_ajustado" ${!src ? 'disabled' : ''}>Importar com meus ajustes no mapeamento</button><button class="btn dan" data-act="impDecide" data-d="nao">Não importar</button></div>
+  <div class="row"><button class="btn pri" data-act="impDecide" data-d="importar">Importar conforme a análise</button><button class="btn" data-act="impDecide" data-d="importar_ajustado">Importar com meus ajustes no mapeamento</button><button class="btn dan" data-act="impDecide" data-d="nao">Não importar</button></div>
   <p class="muted" style="margin:6px 0 0">Ao importar, o servidor registra IP, data, hora, local, carimbo de tempo e SHA-256 do arquivo antes de gravar qualquer registro.</p></div>`;
 }
 function provenanceCard(i) {

@@ -145,6 +145,26 @@ async function pullChanges(t) {
   return { added, imports: imps, more: !!d.more };
 }
 
+/* ---------- registro do arquivo original ---------- */
+// até 40 MB vai numa requisição; acima disso, em partes de 40 MB (limite do servidor é 100 MB por requisição)
+const PART = 40 * 1024 * 1024;
+async function registerFile(tid, q, bytes, onProgress) {
+  const qs = o => Object.entries(o).map(([k, v]) => k + '=' + encodeURIComponent(typeof v === 'string' ? v : JSON.stringify(v))).join('&');
+  const base = '/t/' + encodeURIComponent(tid);
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (u8.byteLength <= PART) return call('POST', base + '/raw?' + qs(q), undefined, u8);
+  const sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', u8)), b => b.toString(16).padStart(2, '0')).join('');
+  const init = await call('POST', base + '/raw-mp?' + qs(Object.assign({ op: 'init' }, q)), {});
+  if (init.already) return init;
+  const parts = [], n = Math.ceil(u8.byteLength / PART);
+  for (let i = 0; i < n; i++) {
+    let r, tries = 0;
+    while (true) { try { r = await call('POST', base + '/raw-mp?' + qs({ op: 'part', import: q.import, name: q.name, upload: init.upload, n: String(i + 1) }), undefined, u8.subarray(i * PART, Math.min(u8.byteLength, (i + 1) * PART))); break; } catch (e) { if (++tries >= 3) throw e; await new Promise(res => setTimeout(res, 1500 * tries)); } }
+    parts.push(r.part); if (onProgress) onProgress(i + 1, n);
+  }
+  return call('POST', base + '/raw-mp?' + qs(Object.assign({ op: 'complete' }, q, { upload: init.upload })), { parts, sha256: sha, bytes: u8.byteLength });
+}
+
 /* ---------- carga ---------- */
 function mergeCfg(base, saved) {
   const c = Object.assign({}, base, saved || {});
@@ -206,7 +226,7 @@ root.CXSync = {
   members: tid => call('GET', '/t/' + encodeURIComponent(tid) + '/members').then(r => r.members),
   setMember: (tid, email, role) => call('POST', '/t/' + encodeURIComponent(tid) + '/members', { email, role }),
   removeMember: (tid, email) => call('DELETE', '/t/' + encodeURIComponent(tid) + '/members/' + encodeURIComponent(email)),
-  registerFile: (tid, q, bytes) => call('POST', '/t/' + encodeURIComponent(tid) + '/raw?' + Object.entries(q).map(([k, v]) => k + '=' + encodeURIComponent(typeof v === 'string' ? v : JSON.stringify(v))).join('&'), undefined, bytes),
+  registerFile,
   connectors: tid => call('GET', '/t/' + encodeURIComponent(tid) + '/connectors'),
   createConnector: (tid, body) => call('POST', '/t/' + encodeURIComponent(tid) + '/connectors', body),
   connectorAction: (tid, cid, action, body) => call('POST', '/t/' + encodeURIComponent(tid) + '/connectors/' + encodeURIComponent(cid) + '/' + action, body || {}),

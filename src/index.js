@@ -293,13 +293,21 @@ export default {
 
         if (sub === 'sync' && req.method === 'POST') return json(await sync(env, tid, user.email, role, await req.json()));
 
-        if (sub === 'raw' && req.method === 'POST') {
-          // registro do arquivo ANTES de gravar registros: guarda o original, calcula o SHA-256 e o comprovante de origem
+        if ((sub === 'raw' || sub === 'raw-mp') && req.method === 'POST') {
+          // registro do arquivo ANTES de gravar registros: guarda o original, o SHA-256 e o comprovante de origem.
+          // Arquivos grandes chegam em partes (raw-mp: init, part, complete) por causa do limite de 100 MB por requisição.
           if (!can(role, 'import')) return fail(403, 'Seu papel não permite importar arquivos.');
           const q = k => String(url.searchParams.get(k) || '');
+          const op = sub === 'raw' ? 'single' : q('op');
           const imp = q('import').replace(/[^\w.-]/g, ''), name = q('name').replace(/[^\w.\- ]/g, '_').slice(0, 120) || 'arquivo', sid = q('source'), aid = q('analysis').replace(/[^\w]/g, '');
           if (!imp) return fail(400, 'Importação não informada.');
-          const an = await env.DB.prepare('SELECT id, result_json FROM ai_analyses WHERE tenant_id = ? AND id = ?').bind(tid, aid).first();
+          const key = tid + '/' + imp + '/' + name;
+          if (op === 'part') {
+            const upId = q('upload'), n = +q('n'); if (!upId || !(n >= 1 && n <= 10000)) return fail(400, 'Parte inválida.');
+            const part = await env.RAW.resumeMultipartUpload(key, upId).uploadPart(n, req.body);
+            return json({ ok: true, part: { partNumber: part.partNumber, etag: part.etag } });
+          }
+          const an = await env.DB.prepare('SELECT id FROM ai_analyses WHERE tenant_id = ? AND id = ?').bind(tid, aid).first();
           if (!an) return fail(409, 'O arquivo precisa ser analisado pela CONNEXT IA antes de gravar.');
           const src = await env.DB.prepare('SELECT * FROM data_sources WHERE tenant_id = ? AND id = ?').bind(tid, sid).first();
           if (!src) return fail(409, 'Escolha a fonte de dados do arquivo antes de gravar.');
@@ -307,11 +315,24 @@ export default {
           if (miss.length) return fail(409, 'A fonte não pode receber dados: falta ' + miss.join(', ') + '.');
           const exists = await env.DB.prepare('SELECT provenance_json FROM import_jobs WHERE tenant_id = ? AND id = ?').bind(tid, imp).first();
           if (exists && exists.provenance_json) return json({ ok: true, provenance: JSON.parse(exists.provenance_json), already: true });
-          const buf = await req.arrayBuffer();
-          if (!buf.byteLength) return fail(400, 'Arquivo vazio.');
-          const sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buf)), b => b.toString(16).padStart(2, '0')).join('');
-          const key = tid + '/' + imp + '/' + name, cf = req.cf || {}, t = now(), d = new Date(t);
-          const brt = new Date(t - 3 * 3600e3).toISOString();
+          if (op === 'init') {
+            const mp = await env.RAW.createMultipartUpload(key, { httpMetadata: { contentType: 'application/octet-stream' }, customMetadata: { tenant: tid, import: imp, uploaded_by: user.email } });
+            return json({ ok: true, key, upload: mp.uploadId });
+          }
+          let bytes, sha, shaBy, parts = null;
+          if (op === 'complete') {
+            const b = await req.json(); if (!Array.isArray(b.parts) || !b.parts.length) return fail(400, 'Partes não informadas.');
+            const obj = await env.RAW.resumeMultipartUpload(key, q('upload')).complete(b.parts.map(x => ({ partNumber: +x.partNumber, etag: String(x.etag) })));
+            bytes = obj.size; sha = String(b.sha256 || '').toLowerCase().replace(/[^0-9a-f]/g, '').slice(0, 64); shaBy = 'navegador de quem enviou (arquivo grande, recebido em ' + b.parts.length + ' partes)'; parts = b.parts.length;
+            if (sha.length !== 64) return fail(400, 'SHA-256 do arquivo inválido.');
+            if (+b.bytes && +b.bytes !== bytes) return fail(409, 'O arquivo recebido não tem o tamanho esperado (' + bytes + ' de ' + b.bytes + ' bytes).');
+          } else {
+            const buf = await req.arrayBuffer();
+            if (!buf.byteLength) return fail(400, 'Arquivo vazio.');
+            bytes = buf.byteLength; sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buf)), b => b.toString(16).padStart(2, '0')).join(''); shaBy = 'servidor';
+            await env.RAW.put(key, buf, { httpMetadata: { contentType: req.headers.get('content-type') || 'application/octet-stream' }, customMetadata: { tenant: tid, import: imp, uploaded_by: user.email, sha256: sha } });
+          }
+          const cf = req.cf || {}, t = now(), d = new Date(t), brt = new Date(t - 3 * 3600e3).toISOString();
           const prov = {
             usuario: user.email, ip: req.headers.get('cf-connecting-ip') || null,
             cidade: cf.city || null, regiao: cf.region || null, pais: cf.country || null, cep: cf.postalCode || null,
@@ -320,14 +341,13 @@ export default {
             navegador: (req.headers.get('user-agent') || '').slice(0, 240),
             data: brt.slice(0, 10).split('-').reverse().join('/'), hora: brt.slice(11, 19) + ' (horário de Brasília)',
             timestamp_iso_utc: d.toISOString(), timestamp_epoch_ms: t,
-            arquivo: name, bytes: buf.byteLength, sha256: sha, arquivo_original: 'r2://connext-raw/' + key,
-            fonte_id: src.id, fonte_nome: src.name, fonte_origem: src.origin, base_legal: src.legal_basis,
+            arquivo: name, bytes, sha256: sha, sha256_calculado_por: shaBy, partes: parts, arquivo_original: 'r2://connext-raw/' + key,
+            fonte_id: src.id, fonte_nome: src.name, proprietario: src.owner || null, fonte_origem: src.origin, base_legal: src.legal_basis,
             analise_ia: aid, requisicao_cloudflare: req.headers.get('cf-ray') || null
           };
-          await env.RAW.put(key, buf, { httpMetadata: { contentType: req.headers.get('content-type') || 'application/octet-stream' }, customMetadata: { tenant: tid, import: imp, uploaded_by: user.email, sha256: sha, ip: prov.ip || '', received_at: prov.timestamp_iso_utc } });
           let decision = null; try { decision = JSON.parse(q('decision') || 'null'); } catch (e) { decision = null; }
-          await env.DB.prepare('INSERT INTO import_jobs (tenant_id, id, source_id, file_name, file_hash, bytes, version, status, actor, at, data_json, raw_key, raw_sha256, provenance_json, ai_analysis_id, decision_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id, id) DO UPDATE SET raw_key = excluded.raw_key, raw_sha256 = excluded.raw_sha256, provenance_json = excluded.provenance_json, ai_analysis_id = excluded.ai_analysis_id, decision_json = excluded.decision_json')
-            .bind(tid, imp, src.id, name, q('hash') || null, buf.byteLength, 1, 'recebido', user.email, t, '{}', key, sha, JSON.stringify(prov), aid, decision ? JSON.stringify(Object.assign(decision, { por: user.email, em: d.toISOString() })) : null).run();
+          await env.DB.prepare('INSERT INTO import_jobs (tenant_id, id, source_id, file_name, file_hash, bytes, version, status, actor, at, data_json, raw_key, raw_sha256, provenance_json, ai_analysis_id, decision_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+            .bind(tid, imp, src.id, name, q('hash') || null, bytes, 1, 'recebido', user.email, t, '{}', key, sha, JSON.stringify(prov), aid, decision ? JSON.stringify(Object.assign(decision, { por: user.email, em: d.toISOString() })) : null).run();
           await audit(env, tid, user.email, 'arquivo_registrado', name + ' · SHA-256 ' + sha.slice(0, 16) + '… · IP ' + (prov.ip || 'n/d') + ' · ' + [prov.cidade, prov.regiao, prov.pais].filter(Boolean).join(', '), imp);
           return json({ ok: true, key, provenance: prov });
         }
