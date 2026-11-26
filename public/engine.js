@@ -266,6 +266,33 @@ CX.parseText = function (name, text) {
   }
   return { format, delimiter, headers, rows, errors, hasHeader: true };
 };
+/* ---------- arquivos grandes (CSV/TSV acima de 60 MB) ----------
+   Ler o arquivo inteiro como linhas consome vários GB de memória no navegador. Para mapear, lê só uma amostra
+   do início; na importação, percorre o arquivo em fatias de 8 MB (CX.streamRows), sem montar todas as linhas. */
+CX.BIG_FILE = 60 * 1024 * 1024;
+const SLICE = 8 * 1024 * 1024;
+const cutAtNewline = (u8, end) => { let i = Math.min(end, u8.length); if (i >= u8.length) return u8.length; while (i > 0 && u8[i - 1] !== 0x0A) i--; return i || end; };
+CX.parseBigSample = function (name, u8) {
+  const bom = u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF ? 3 : 0, end = cutAtNewline(u8, bom + 4 * 1024 * 1024);
+  let encoding = 'UTF-8', text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(u8.subarray(bom, end)); } catch (e) { encoding = 'Windows-1252 (Latin-1)'; text = new TextDecoder('windows-1252').decode(u8.subarray(bom, end)); }
+  const p = CX.parseText(name, text); let lines = 0; for (let i = 0; i < u8.length; i++) if (u8[i] === 0x0A) lines++; if (u8.length && u8[u8.length - 1] !== 0x0A) lines++;
+  const headerRow = !p.headers.every(h => /^coluna_\d+$/.test(h)), total = Math.max(0, lines - (headerRow ? 1 : 0));
+  const tail = new TextDecoder(encoding === 'UTF-8' ? 'utf-8' : 'windows-1252').decode(u8.subarray(Math.max(0, u8.length - 65536)));
+  return Object.assign(p, { encoding: encoding + (bom ? ' (BOM)' : ''), fileHash: hash(u8.length + '|' + text.slice(0, 200000) + '|' + tail), bytes: u8.length, big: { total, headerRow, bom, encoding, sampleRows: p.rows.length } });
+};
+// percorre o arquivo grande em fatias; onRows recebe lotes de linhas já separadas em colunas
+CX.streamRows = async function (u8, p, onRows, onProgress) {
+  const dec = new TextDecoder(p.big.encoding === 'UTF-8' ? 'utf-8' : 'windows-1252'), w = p.headers.length; let pos = p.big.bom, first = true, rowsSeen = 0;
+  while (pos < u8.length) {
+    const end = cutAtNewline(u8, pos + SLICE), text = dec.decode(u8.subarray(pos, end)); pos = end;
+    let rows = parseDelimited(text, p.delimiter); if (first && p.big.headerRow) rows = rows.slice(1); first = false;
+    for (const r of rows) { if (r.length < w) while (r.length < w) r.push(''); else if (r.length > w) r.length = w; }
+    rowsSeen += rows.length; onRows(rows); if (onProgress) onProgress(pos, u8.length, rowsSeen);
+    await new Promise(res => setTimeout(res, 0));
+  }
+  return rowsSeen;
+};
 CX.parseBytes = function (name, u8) {
   const ext = (name.split('.').pop() || '').toLowerCase();
   if (ext === 'parquet' || ext === 'avro') throw new Error(ext.toUpperCase() + ' é processado pelo serviço de backend (Parquet/Iceberg), não disponível nesta versão web');
@@ -277,6 +304,7 @@ CX.parseBytes = function (name, u8) {
     const rows = all.slice(1).map(r => { r = r.map(String); while (r.length < headers.length) r.push(''); return r; });
     return { format: ext.toUpperCase(), encoding: 'binário', delimiter: null, headers, rows, errors: [], fileHash: hash(JSON.stringify(all)), bytes: u8.length };
   }
+  if (/^(csv|tsv|txt)$/.test(ext) && u8.length > CX.BIG_FILE) return CX.parseBigSample(name, u8);
   const { text, encoding } = CX.decodeBytes(u8);
   const p = CX.parseText(name, text); p.encoding = encoding; p.fileHash = hash(text); p.bytes = u8.length; return p;
 };

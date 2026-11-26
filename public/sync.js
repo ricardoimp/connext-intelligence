@@ -103,13 +103,13 @@ function diff(t) {
 async function push(t, onProgress) {
   if (!t.remote || !t._sync) return { written: 0 };
   const dd = diff(t); if (!dd.ops.length && !dd.tenant) return { written: 0 };
-  // fatia em requisições de até ~400 linhas
+  // fatia em requisições de até ~1.000 linhas
   const reqs = []; let cur = { ops: [] }, n = 0;
   for (const op of dd.ops) {
     const list = op.op === 'upsert' ? op.rows : op.keys;
-    for (let i = 0; i < list.length; i += 400) {
-      const part = list.slice(i, i + 400);
-      if (n + part.length > 400 && cur.ops.length) { reqs.push(cur); cur = { ops: [] }; n = 0; }
+    for (let i = 0; i < list.length; i += 1000) {
+      const part = list.slice(i, i + 1000);
+      if (n + part.length > 1000 && cur.ops.length) { reqs.push(cur); cur = { ops: [] }; n = 0; }
       cur.ops.push(op.op === 'upsert' ? { t: op.t, op: 'upsert', rows: part } : { t: op.t, op: op.op, keys: part }); n += part.length;
     }
   }
