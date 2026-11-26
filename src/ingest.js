@@ -4,7 +4,7 @@
 const CX = globalThis.CX;
 const rid = () => crypto.randomUUID().replace(/-/g, '').slice(0, 6);
 
-export async function serverImport(env, tid, conn, data, label, actor) {
+export async function serverImport(env, tid, conn, data, label, actor, extra) {
   const tenant = await env.DB.prepare('SELECT salt, seq FROM tenants WHERE id = ?').bind(tid).first();
   const s = await env.DB.prepare('SELECT * FROM data_sources WHERE tenant_id = ? AND id = ?').bind(tid, conn.source_id).first();
   if (!s) throw Object.assign(new Error('A fonte vinculada ao conector não existe mais.'), { status: 409 });
@@ -24,11 +24,15 @@ export async function serverImport(env, tid, conn, data, label, actor) {
 
   const t = CX.newTenant(tid, tid); t.salt = tenant.salt; t.seq = tenant.seq || 0; t.idp = 'srv' + rid() + '_'; t.sources = [src];
   const b = CX.beginImport(t, { sourceId: src.id, fileName: label, fileHash, format: conn.type.toUpperCase(), encoding: 'UTF-8', bytes: JSON.stringify(data.rows).length, at: Date.now(), actor, mapping, headerMap, sig: sug.sig, parseErrors: data.errors || [], total: data.rows.length });
-  const job = b.job; CX.processChunk(t, job, data.rows, 0, data.rows.length); job.status = 'concluído';
-  const now = Date.now(), stmts = [];
-  stmts.push(env.DB.prepare('INSERT OR REPLACE INTO import_jobs (tenant_id, id, source_id, file_name, file_hash, format, encoding, bytes, version, status, total, received, normalized, validated, row_errors, raw_key, actor, at, data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-    .bind(tid, job.id, src.id, label, fileHash, job.format, job.encoding, job.bytes, 1, job.status, job.total, job.st.received, job.st.normalized, job.st.validated, job.rowErrors.length, null, actor, job.at, JSON.stringify({ mapping, st: job.st, ms: job.ms, parseErrors: job.parseErrors.slice(0, 200), rowErrors: job.rowErrors.slice(0, 200), cursor: job.cursor, connector: conn.id })));
-  for (const r of t.records) stmts.push(env.DB.prepare('INSERT OR REPLACE INTO source_records (tenant_id, id, source_id, import_id, row_num, entity_type, observed_at, payload_json, created_at) VALUES (?,?,?,?,?,?,?,?,?)').bind(tid, r.id, r.source_id, r.import_id, r.row, r.type, r.observed_at, JSON.stringify({ f: r.f, flags: r.flags }), now));
+  const job = b.job, now = Date.now(), d = new Date(now), brt = new Date(now - 3 * 3600e3).toISOString();
+  const sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify([data.headers, data.rows])))), x => x.toString(16).padStart(2, '0')).join('');
+  const prov = Object.assign({ usuario: actor, conexao_id: conn.id, conexao_nome: conn.name, data: brt.slice(0, 10).split('-').reverse().join('/'), hora: brt.slice(11, 19) + ' (horário de Brasília)', timestamp_iso_utc: d.toISOString(), timestamp_epoch_ms: now, registros_recebidos: data.rows.length, sha256: sha, fonte_id: src.id, fonte_nome: src.name, fonte_origem: src.origin, base_legal: src.legal_basis }, extra || {});
+  job.origin = { source_id: src.id, source_name: src.name, import_id: job.id, file: label, by: actor, channel: (extra && extra.canal) || conn.type, ip: (extra && extra.ip) || null, at: now };
+  CX.processChunk(t, job, data.rows, 0, data.rows.length); job.status = 'concluído';
+  const stmts = [];
+  stmts.push(env.DB.prepare('INSERT OR REPLACE INTO import_jobs (tenant_id, id, source_id, file_name, file_hash, format, encoding, bytes, version, status, total, received, normalized, validated, row_errors, raw_key, actor, at, provenance_json, raw_sha256, ai_analysis_id, data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .bind(tid, job.id, src.id, label, fileHash, job.format, job.encoding, job.bytes, 1, job.status, job.total, job.st.received, job.st.normalized, job.st.validated, job.rowErrors.length, null, actor, job.at, JSON.stringify(prov), sha, conn.mapping_json ? 'mapeamento_aprovado:' + conn.id : 'regras', JSON.stringify({ mapping, st: job.st, ms: job.ms, parseErrors: job.parseErrors.slice(0, 200), rowErrors: job.rowErrors.slice(0, 200), cursor: job.cursor, connector: conn.id })));
+  for (const r of t.records) stmts.push(env.DB.prepare('INSERT OR REPLACE INTO source_records (tenant_id, id, source_id, import_id, row_num, entity_type, observed_at, payload_json, created_at) VALUES (?,?,?,?,?,?,?,?,?)').bind(tid, r.id, r.source_id, r.import_id, r.row, r.type, r.observed_at, JSON.stringify({ f: r.f, flags: r.flags, origin: r.origin }), now));
   stmts.push(env.DB.prepare('UPDATE tenants SET seq = MAX(seq, ?), updated_at = ? WHERE id = ?').bind(t.seq, now, tid));
   stmts.push(env.DB.prepare('INSERT INTO workflow_executions (tenant_id, id, kind, trigger, ref, at, state, attempts, ms, cost, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?)').bind(tid, 'wf_' + t.idp + '1', 'Importação por conector', conn.type === 'webhook' ? 'Novo registro recebido' : 'Sincronização agendada', job.id, now, 'concluído', 1, job.ms.normalize, 0, job.st.normalized + ' registros de ' + conn.name));
   stmts.push(env.DB.prepare('INSERT INTO audit_events (tenant_id, id, at, actor, action, detail, ref) VALUES (?,?,?,?,?,?,?)').bind(tid, 'srv_' + t.idp + 'imp', now, actor, 'importacao_concluida', job.id + ' · ' + job.st.normalized + ' registros · ' + conn.name, conn.id));

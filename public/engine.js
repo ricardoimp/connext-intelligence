@@ -340,15 +340,16 @@ CX.beginImport = function (t, m) {
   const prev = t.imports.find(i => i.fileHash === m.fileHash && i.sourceId === m.sourceId && i.status === 'concluído');
   if (prev) { CX.audit(t, m.actor || 'sistema', 'importacao_idempotente', prev.id); return { skipped: true, job: prev, reason: 'Arquivo idêntico já importado nesta fonte (' + prev.id + '). Nenhum registro duplicado foi criado.' }; }
   const version = t.imports.filter(i => i.fileName === m.fileName && i.sourceId === m.sourceId).length + 1;
-  const job = { id: 'imp_' + (t.idp || '') + (t.imports.length + 1), sourceId: m.sourceId, fileName: m.fileName, fileHash: m.fileHash, format: m.format, encoding: m.encoding, bytes: m.bytes || 0, version, at: m.at || CX.now(), actor: m.actor || 'sistema', status: 'processando', mapping: m.mapping, total: m.total || 0, cursor: 0, parseErrors: m.parseErrors || [], rowErrors: [], st: { received: (m.total || 0) + (m.parseErrors || []).filter(e => !e.warn).length, extracted: m.total || 0, mapped: 0, normalized: 0, validated: 0 }, ms: { extract: m.msExtract || 0, normalize: 0, resolve: 0 }, recIds: [] };
-  t.imports.push(job);
+  const src0 = t.sources.find(s => s.id === m.sourceId);
+  const job = { origin: { source_id: m.sourceId, source_name: src0 ? src0.name : m.sourceId, import_id: null, file: m.fileName, by: m.actor || 'sistema', channel: 'arquivo', at: m.at || CX.now() }, id: 'imp_' + (t.idp || '') + (t.imports.length + 1), sourceId: m.sourceId, fileName: m.fileName, fileHash: m.fileHash, format: m.format, encoding: m.encoding, bytes: m.bytes || 0, version, at: m.at || CX.now(), actor: m.actor || 'sistema', status: 'processando', mapping: m.mapping, total: m.total || 0, cursor: 0, parseErrors: m.parseErrors || [], rowErrors: [], st: { received: (m.total || 0) + (m.parseErrors || []).filter(e => !e.warn).length, extracted: m.total || 0, mapped: 0, normalized: 0, validated: 0 }, ms: { extract: m.msExtract || 0, normalize: 0, resolve: 0 }, recIds: [] };
+  job.origin.import_id = job.id; t.imports.push(job);
   if (m.sig) t.mappings[m.sig] = { map: m.headerMap || {}, at: CX.now(), used: (t.mappings[m.sig] ? t.mappings[m.sig].used : 0) + 1, fileName: m.fileName };
   return { job };
 };
 CX.processChunk = function (t, job, rows, start, end) {
   const t0 = Date.now(), map = job.mapping;
   for (let i = start; i < end; i++) {
-    const arr = rows[i], rec = { id: 'rec_' + (t.idp || '') + (++t.seq).toString(36), source_id: job.sourceId, import_id: job.id, row: i + 1, f: {}, observed_at: job.at, flags: null };
+    const arr = rows[i], rec = { id: 'rec_' + (t.idp || '') + (++t.seq).toString(36), source_id: job.sourceId, import_id: job.id, row: i + 1, f: {}, observed_at: job.at, flags: null, origin: job.origin || null };
     let any = false, anyValid = false;
     for (const c in map) {
       const field = map[c], v = arr[c]; if (!field || v === '' || v == null) continue;

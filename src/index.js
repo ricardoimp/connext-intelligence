@@ -51,7 +51,7 @@ const can = (role, action) => (PERMS[role] || []).includes(action);
 // cols: colunas aceitas além de tenant_id; pk: chave; need: permissão mínima para escrever
 const TABLES = {
   data_sources: { cols: ['id', 'name', 'type', 'origin', 'owner', 'legal_basis', 'purposes_json', 'reliability', 'contract', 'created_at', 'updated_at'], pk: ['id'], need: 'import' },
-  import_jobs: { cols: ['id', 'source_id', 'file_name', 'file_hash', 'format', 'encoding', 'bytes', 'version', 'status', 'total', 'received', 'normalized', 'validated', 'row_errors', 'raw_key', 'actor', 'at', 'data_json'], pk: ['id'], need: 'import' },
+  import_jobs: { cols: ['id', 'source_id', 'file_name', 'file_hash', 'format', 'encoding', 'bytes', 'version', 'status', 'total', 'received', 'normalized', 'validated', 'row_errors', 'actor', 'at', 'data_json'], pk: ['id'], need: 'import', registered: true },
   source_records: { cols: ['id', 'source_id', 'import_id', 'row_num', 'entity_type', 'observed_at', 'payload_json', 'created_at'], pk: ['id'], need: 'import' },
   mapping_templates: { cols: ['sig', 'file_name', 'map_json', 'used', 'at'], pk: ['sig'], need: 'import' },
   identity_decisions: { cols: ['pair_key', 'kind', 'actor', 'at'], pk: ['pair_key', 'kind'], need: 'merge' },
@@ -146,13 +146,29 @@ async function load(env, tid) {
 
 /* ---------- sincronização ---------- */
 async function sync(env, tid, email, role, body) {
-  const stmts = [], denied = [];
+  const stmts = [], denied = [], okImports = new Set();
   for (const op of body.ops || []) {
     const def = TABLES[op.t]; if (!def) { denied.push(op.t + ': tabela desconhecida'); continue; }
     if (op.op === 'upsert') {
       if (def.need && !can(role, def.need)) { denied.push(op.t); continue; }
-      const cols = ['tenant_id'].concat(def.cols), sql = 'INSERT OR REPLACE INTO ' + op.t + ' (' + cols.join(',') + ') VALUES (' + cols.map(() => '?').join(',') + ')';
-      for (const row of op.rows || []) {
+      const cols = ['tenant_id'].concat(def.cols);
+      // atualiza só as colunas do cliente; colunas do servidor (comprovante, hash, arquivo bruto) nunca são sobrescritas
+      const sql = 'INSERT INTO ' + op.t + ' (' + cols.join(',') + ') VALUES (' + cols.map(() => '?').join(',') + ') ON CONFLICT(tenant_id,' + def.pk.join(',') + ') ' + (def.cols.some(c => !def.pk.includes(c)) ? 'DO UPDATE SET ' + def.cols.filter(c => !def.pk.includes(c)).map(c => c + '=excluded.' + c).join(',') : 'DO NOTHING');
+      let rows = op.rows || [];
+      if (def.registered) {
+        // importação só grava se o arquivo foi registrado antes (comprovante de origem + leitura da IA)
+        const ids = rows.map(r => r.id), ok = new Set();
+        for (let i = 0; i < ids.length; i += 90) { const part = ids.slice(i, i + 90); (await env.DB.prepare('SELECT id FROM import_jobs WHERE tenant_id = ? AND provenance_json IS NOT NULL AND ai_analysis_id IS NOT NULL AND id IN (' + part.map(() => '?').join(',') + ')').bind(tid, ...part).all()).results.forEach(x => ok.add(x.id)); }
+        const bad = rows.filter(r => !ok.has(r.id)); if (bad.length) denied.push(bad.length + ' importação(ões) sem registro de origem e leitura da IA');
+        rows = rows.filter(r => ok.has(r.id)); rows.forEach(r => okImports.add(r.id));
+      }
+      if (op.t === 'source_records') {
+        const need = Array.from(new Set(rows.map(r => r.import_id).filter(x => x && !okImports.has(x))));
+        for (let i = 0; i < need.length; i += 90) { const part = need.slice(i, i + 90); (await env.DB.prepare('SELECT id FROM import_jobs WHERE tenant_id = ? AND provenance_json IS NOT NULL AND id IN (' + part.map(() => '?').join(',') + ')').bind(tid, ...part).all()).results.forEach(x => okImports.add(x.id)); }
+        const bad = rows.filter(r => r.import_id && !okImports.has(r.import_id)); if (bad.length) denied.push(bad.length + ' registro(s) de importação sem comprovante de origem');
+        rows = rows.filter(r => !r.import_id || okImports.has(r.import_id));
+      }
+      for (const row of rows) {
         const vals = [tid].concat(def.cols.map(c => { const v = row[c]; return v === undefined ? null : (typeof v === 'object' && v !== null ? JSON.stringify(v) : v); }));
         if (op.t === 'source_records' && vals[def.cols.indexOf('created_at') + 1] == null) vals[def.cols.indexOf('created_at') + 1] = now();
         stmts.push(env.DB.prepare(sql).bind(...vals));
@@ -186,7 +202,7 @@ async function runConnector(env, tid, c, actor) {
   const t0 = now(); let res;
   try {
     const data = await fetchBatch(c.type, JSON.parse(c.config_json || '{}'), secret, c.cursor);
-    const out = await serverImport(env, tid, c, data, c.name + ' · ' + new Date().toISOString().slice(0, 16).replace('T', ' '), actor);
+    const out = await serverImport(env, tid, c, data, c.name + ' · ' + new Date().toISOString().slice(0, 16).replace('T', ' '), actor, { canal: 'conector ' + c.type, executado_por: actor, cursor_anterior: c.cursor || null });
     res = Object.assign({ fetched: data.rows.length, more: !!data.more, ms: now() - t0 }, out);
     await env.DB.prepare('UPDATE connectors SET cursor = ?, last_sync_at = ?, last_result_json = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(data.fullSnapshot ? c.cursor : (data.cursor || c.cursor), now(), JSON.stringify(res), tid, c.id).run();
     return res;
@@ -209,7 +225,8 @@ async function webhook(req, env, url) {
   if (list.length > 1000) return fail(413, 'Envie até 1.000 registros por requisição.');
   const p = globalThis.CX.parseText('webhook.json', JSON.stringify(list));
   try {
-    const out = await serverImport(env, tid, c, p, c.name + ' · webhook ' + new Date().toISOString().slice(0, 19).replace('T', ' '), 'conector:' + c.id);
+    const cf = req.cf || {};
+    const out = await serverImport(env, tid, c, p, c.name + ' · webhook ' + new Date().toISOString().slice(0, 19).replace('T', ' '), 'conector:' + c.id, { canal: 'webhook', ip: req.headers.get('cf-connecting-ip') || null, cidade: cf.city || null, regiao: cf.region || null, pais: cf.country || null, provedor: cf.asOrganization || null, asn: cf.asn || null, datacenter_cloudflare: cf.colo || null, navegador: (req.headers.get('user-agent') || '').slice(0, 240), requisicao_cloudflare: req.headers.get('cf-ray') || null });
     await env.DB.prepare('UPDATE connectors SET last_sync_at = ?, last_result_json = ?, last_error = NULL WHERE tenant_id = ? AND id = ?').bind(now(), JSON.stringify(out), tid, c.id).run();
     await usage(env, tid, 'POST webhook');
     return json(Object.assign({ ok: true }, out), 202);
@@ -254,6 +271,7 @@ export default {
         await usage(env, tid, req.method + ' ' + (sub || 'tenant'));
 
         if (sub === 'load' && req.method === 'GET') return json(await load(env, tid));
+        if (sub === 'analysis' && req.method === 'GET' && parts[4]) { const a = await env.DB.prepare('SELECT id, kind, ref, at, actor, model, result_json FROM ai_analyses WHERE tenant_id = ? AND id = ?').bind(tid, parts[4]).first(); return a ? json({ ok: true, analysis: a }) : fail(404, 'Análise não encontrada.'); }
 
         if (sub === 'records' && req.method === 'GET') {
           const after = url.searchParams.get('after') || '', limit = Math.min(5000, +url.searchParams.get('limit') || 2000);
@@ -264,14 +282,42 @@ export default {
         if (sub === 'sync' && req.method === 'POST') return json(await sync(env, tid, user.email, role, await req.json()));
 
         if (sub === 'raw' && req.method === 'POST') {
+          // registro do arquivo ANTES de gravar registros: guarda o original, calcula o SHA-256 e o comprovante de origem
           if (!can(role, 'import')) return fail(403, 'Seu papel não permite importar arquivos.');
-          const imp = String(url.searchParams.get('import') || '').replace(/[^\w.-]/g, ''), name = String(url.searchParams.get('name') || 'arquivo').replace(/[^\w.\- ]/g, '_').slice(0, 120);
+          const q = k => String(url.searchParams.get(k) || '');
+          const imp = q('import').replace(/[^\w.-]/g, ''), name = q('name').replace(/[^\w.\- ]/g, '_').slice(0, 120) || 'arquivo', sid = q('source'), aid = q('analysis').replace(/[^\w]/g, '');
           if (!imp) return fail(400, 'Importação não informada.');
-          const key = tid + '/' + imp + '/' + name;
-          await env.RAW.put(key, req.body, { httpMetadata: { contentType: req.headers.get('content-type') || 'application/octet-stream' }, customMetadata: { tenant: tid, import: imp, uploaded_by: user.email } });
-          await env.DB.prepare('UPDATE import_jobs SET raw_key = ? WHERE tenant_id = ? AND id = ?').bind(key, tid, imp).run();
-          await audit(env, tid, user.email, 'arquivo_bruto_armazenado', name, imp);
-          return json({ ok: true, key });
+          const an = await env.DB.prepare('SELECT id, result_json FROM ai_analyses WHERE tenant_id = ? AND id = ?').bind(tid, aid).first();
+          if (!an) return fail(409, 'O arquivo precisa ser analisado pelo Claude antes de gravar.');
+          const src = await env.DB.prepare('SELECT * FROM data_sources WHERE tenant_id = ? AND id = ?').bind(tid, sid).first();
+          if (!src) return fail(409, 'Escolha a fonte de dados do arquivo antes de gravar.');
+          const miss = globalThis.CX.sourcePolicy({ origin: src.origin, legal_basis: src.legal_basis, purposes: JSON.parse(src.purposes_json || '[]') });
+          if (miss.length) return fail(409, 'A fonte não pode receber dados: falta ' + miss.join(', ') + '.');
+          const exists = await env.DB.prepare('SELECT provenance_json FROM import_jobs WHERE tenant_id = ? AND id = ?').bind(tid, imp).first();
+          if (exists && exists.provenance_json) return json({ ok: true, provenance: JSON.parse(exists.provenance_json), already: true });
+          const buf = await req.arrayBuffer();
+          if (!buf.byteLength) return fail(400, 'Arquivo vazio.');
+          const sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buf)), b => b.toString(16).padStart(2, '0')).join('');
+          const key = tid + '/' + imp + '/' + name, cf = req.cf || {}, t = now(), d = new Date(t);
+          const brt = new Date(t - 3 * 3600e3).toISOString();
+          const prov = {
+            usuario: user.email, ip: req.headers.get('cf-connecting-ip') || null,
+            cidade: cf.city || null, regiao: cf.region || null, pais: cf.country || null, cep: cf.postalCode || null,
+            latitude: cf.latitude || null, longitude: cf.longitude || null, fuso_horario: cf.timezone || null,
+            provedor: cf.asOrganization || null, asn: cf.asn || null, datacenter_cloudflare: cf.colo || null,
+            navegador: (req.headers.get('user-agent') || '').slice(0, 240),
+            data: brt.slice(0, 10).split('-').reverse().join('/'), hora: brt.slice(11, 19) + ' (horário de Brasília)',
+            timestamp_iso_utc: d.toISOString(), timestamp_epoch_ms: t,
+            arquivo: name, bytes: buf.byteLength, sha256: sha, arquivo_original: 'r2://connext-raw/' + key,
+            fonte_id: src.id, fonte_nome: src.name, fonte_origem: src.origin, base_legal: src.legal_basis,
+            analise_ia: aid, requisicao_cloudflare: req.headers.get('cf-ray') || null
+          };
+          await env.RAW.put(key, buf, { httpMetadata: { contentType: req.headers.get('content-type') || 'application/octet-stream' }, customMetadata: { tenant: tid, import: imp, uploaded_by: user.email, sha256: sha, ip: prov.ip || '', received_at: prov.timestamp_iso_utc } });
+          let decision = null; try { decision = JSON.parse(q('decision') || 'null'); } catch (e) { decision = null; }
+          await env.DB.prepare('INSERT INTO import_jobs (tenant_id, id, source_id, file_name, file_hash, bytes, version, status, actor, at, data_json, raw_key, raw_sha256, provenance_json, ai_analysis_id, decision_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id, id) DO UPDATE SET raw_key = excluded.raw_key, raw_sha256 = excluded.raw_sha256, provenance_json = excluded.provenance_json, ai_analysis_id = excluded.ai_analysis_id, decision_json = excluded.decision_json')
+            .bind(tid, imp, src.id, name, q('hash') || null, buf.byteLength, 1, 'recebido', user.email, t, '{}', key, sha, JSON.stringify(prov), aid, decision ? JSON.stringify(Object.assign(decision, { por: user.email, em: d.toISOString() })) : null).run();
+          await audit(env, tid, user.email, 'arquivo_registrado', name + ' · SHA-256 ' + sha.slice(0, 16) + '… · IP ' + (prov.ip || 'n/d') + ' · ' + [prov.cidade, prov.regiao, prov.pais].filter(Boolean).join(', '), imp);
+          return json({ ok: true, key, provenance: prov });
         }
 
         if (sub === 'members') {

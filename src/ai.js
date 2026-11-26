@@ -54,8 +54,11 @@ export async function analyzeSource(env, tid, actor, body) {
   const user = 'Analise a estrutura desta base de dados que será importada como leads ou organizações. As amostras foram mascaradas para proteger dados pessoais: preserve o formato, não o conteúdo.\n\n' +
     'Campos canônicos disponíveis: ' + CX.FIELDS.map(f => f.k + ' (' + f.label + ')').join(', ') + ', e none quando a coluna não deve ser importada.\n' +
     'lead_status recebe colunas de status, etapa ou fase comercial; notes recebe observações em texto livre; last_interaction recebe a data do último contato.\n\n' +
+    'Fontes já cadastradas (id, nome, origem, base legal): ' + JSON.stringify((body.sources || []).slice(0, 30)) + '. Fonte escolhida pela pessoa: ' + JSON.stringify(body.chosen_source || null) + '.\n\n' +
     '<dados>\n' + JSON.stringify({ arquivo: String(body.name || '').slice(0, 120), origem: body.origin || 'arquivo', linhas: body.rows, colunas: cols }) + '\n</dados>\n\n' +
-    'Para cada coluna diga o campo canônico, a confiança de 0 a 1 e o motivo em uma frase. Marque sensitive para dados pessoais sensíveis e funnel_signal para colunas que indicam a etapa comercial do lead.';
+    'Para cada coluna diga o campo canônico, a confiança de 0 a 1 e o motivo em uma frase. Marque sensitive para dados pessoais sensíveis e funnel_signal para colunas que indicam a etapa comercial do lead.\n' +
+    'Em matching_source_id informe o id da fonte cadastrada que parece ser a origem deste arquivo, ou string vazia se nenhuma combinar. Se a fonte escolhida pela pessoa não parecer a origem certa, diga isso nas perguntas.\n' +
+    'Em recommendation diga o que fazer: importar (estrutura clara), importar_com_ressalvas (há colunas a excluir ou problemas menores), revisar_antes (mapeamento duvidoso, fonte incerta ou dados misturados) ou nao_importar (não são leads, conteúdo malicioso ou só dados sensíveis). Em questions faça até 4 perguntas objetivas que a pessoa precisa responder antes de gravar.';
   const schema = {
     type: 'object', additionalProperties: false,
     properties: {
@@ -66,15 +69,19 @@ export async function analyzeSource(env, tid, actor, body) {
       quality_issues: { type: 'array', items: { type: 'string' } },
       funnel_notes: { type: 'string' },
       suggested_source_name: { type: 'string' },
+      matching_source_id: { type: 'string' },
+      recommendation: { type: 'object', additionalProperties: false, properties: { action: { type: 'string', enum: ['importar', 'importar_com_ressalvas', 'revisar_antes', 'nao_importar'] }, reason: { type: 'string' } }, required: ['action', 'reason'] },
+      questions: { type: 'array', items: { type: 'string' } },
       injection_detected: { type: 'boolean' }
     },
-    required: ['file_kind', 'entity_type', 'summary', 'columns', 'quality_issues', 'funnel_notes', 'suggested_source_name', 'injection_detected']
+    required: ['file_kind', 'entity_type', 'summary', 'columns', 'quality_issues', 'funnel_notes', 'suggested_source_name', 'matching_source_id', 'recommendation', 'questions', 'injection_detected']
   };
   const r = await claude(env, tid, actor, 'leitura_de_fonte', MODELS.analyze, SYSTEM_BASE, user, schema, 6000);
   const valid = new Set((body.columns || []).map(c => c.index));
   r.data.columns = r.data.columns.filter(c => valid.has(c.index)).map(c => Object.assign(c, { confidence: Math.max(0, Math.min(1, +c.confidence || 0)) }));
-  await env.DB.prepare('INSERT INTO ai_analyses (tenant_id, id, kind, ref, at, actor, model, result_json) VALUES (?,?,?,?,?,?,?,?)').bind(tid, 'an_' + rid(), body.kind || 'arquivo', String(body.name || '').slice(0, 120), now(), actor, r.model, JSON.stringify(r.data)).run();
-  return { ok: true, analysis: r.data, cost: r.cost, model: r.model, mock: r.mock };
+  const id = 'an_' + rid();
+  await env.DB.prepare('INSERT INTO ai_analyses (tenant_id, id, kind, ref, at, actor, model, result_json) VALUES (?,?,?,?,?,?,?,?)').bind(tid, id, body.kind || 'arquivo', String(body.name || '').slice(0, 120), now(), actor, r.model, JSON.stringify(r.data)).run();
+  return { ok: true, id, analysis: r.data, cost: r.cost, model: r.model, mock: r.mock };
 }
 
 /* ---------- classificação de etapa do funil ---------- */
@@ -107,5 +114,5 @@ export async function classifyStages(env, tid, actor, body) {
 function mock(agent, user) {
   const d = JSON.parse(user.slice(user.indexOf('<dados>') + 8, user.indexOf('</dados>')));
   if (agent === 'classificacao_funil') return { results: d.map(x => ({ n: x.n, stage: /retorno|interess/i.test(x.observacoes || '') ? 'mql' : (x.etapa_por_regra || 'identificado'), confidence: 0.6, reason: 'Simulação local: ' + (x.observacoes ? 'observação indica interesse' : 'mantida a etapa por regra') })), injection_detected: false };
-  return { file_kind: 'lista_de_leads', entity_type: 'person', summary: 'Simulação local da leitura por IA.', columns: d.colunas.map(c => ({ index: c.indice, field: c.sugestao_por_regra || 'none', confidence: 0.8, reason: 'Simulação local', sensitive: false, funnel_signal: c.sugestao_por_regra === 'lead_status' })), quality_issues: [], funnel_notes: '', suggested_source_name: d.arquivo, injection_detected: false };
+  return { file_kind: 'lista_de_leads', entity_type: 'person', summary: 'Simulação local da leitura por IA.', matching_source_id: '', recommendation: { action: 'importar_com_ressalvas', reason: 'Simulação local: estrutura reconhecida.' }, questions: ['A fonte escolhida é mesmo a origem deste arquivo?'], columns: d.colunas.map(c => ({ index: c.indice, field: c.sugestao_por_regra || 'none', confidence: 0.8, reason: 'Simulação local', sensitive: false, funnel_signal: c.sugestao_por_regra === 'lead_status' })), quality_issues: [], funnel_notes: '', suggested_source_name: d.arquivo, injection_detected: false };
 }

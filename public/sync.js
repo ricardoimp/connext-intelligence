@@ -36,7 +36,7 @@ function tables(t, prev) {
   const T = {};
   T.data_sources = t.sources.map(s => ({ id: s.id, name: s.name || s.id, type: s.type, origin: s.origin, owner: s.owner, legal_basis: s.legal_basis, purposes_json: s.purposes || [], reliability: s.reliability, contract: s.contract, created_at: s.created_at, updated_at: s.updated_at || s.created_at }));
   T.import_jobs = t.imports.filter(i => i.status !== 'processando').map(i => ({ id: i.id, source_id: i.sourceId, file_name: i.fileName, file_hash: i.fileHash, format: i.format, encoding: i.encoding, bytes: i.bytes, version: i.version, status: i.status, total: i.total, received: i.st.received, normalized: i.st.normalized, validated: i.st.validated, row_errors: i.rowErrors.length + i.parseErrors.length, raw_key: i.raw_key || null, actor: i.actor, at: i.at, data_json: { mapping: i.mapping, st: i.st, ms: i.ms, parseErrors: i.parseErrors.slice(0, 200), rowErrors: i.rowErrors.slice(0, 200), cursor: i.cursor } }));
-  T.source_records = t.records.map(r => ({ id: r.id, source_id: r.source_id, import_id: r.import_id, row_num: r.row, entity_type: r.type, observed_at: r.observed_at, payload_json: { f: r.f, flags: r.flags } }));
+  T.source_records = t.records.map(r => ({ id: r.id, source_id: r.source_id, import_id: r.import_id, row_num: r.row, entity_type: r.type, observed_at: r.observed_at, payload_json: { f: r.f, flags: r.flags, origin: r.origin || null } }));
   T.mapping_templates = Object.keys(t.mappings).map(sig => { const m = t.mappings[sig]; return { sig, file_name: m.fileName, map_json: m.map, used: m.used, at: m.at }; });
   T.identity_decisions = [];
   ['merge', 'reject', 'split'].forEach(kind => { for (const k in t.decisions[kind]) T.identity_decisions.push({ pair_key: k, kind, actor: t.decisions[kind][k].actor, at: t.decisions[kind][k].at }); });
@@ -137,7 +137,7 @@ async function loadTenant(id, role, onProgress) {
   t.salt = d.tenant.salt; t.config = mergeCfg(CX.defaultConfig(), parse(d.tenant.config_json, {}));
   t.spend = d.tenant.spend || 0; t.seq = d.tenant.seq || 0; t.cacheHits = d.tenant.cache_hits || 0;
   t.sources = d.sources.map(s => ({ id: s.id, name: s.name, type: s.type, origin: s.origin || '', owner: s.owner || '', legal_basis: s.legal_basis || '', purposes: parse(s.purposes_json, []), reliability: s.reliability, contract: s.contract || '', created_at: s.created_at, updated_at: s.updated_at }));
-  t.imports = d.imports.map(i => { const x = parse(i.data_json, {}); return { id: i.id, sourceId: i.source_id, fileName: i.file_name, fileHash: i.file_hash, format: i.format, encoding: i.encoding, bytes: i.bytes, version: i.version, at: i.at, actor: i.actor, status: i.status, mapping: x.mapping || {}, total: i.total, cursor: x.cursor || i.total, parseErrors: x.parseErrors || [], rowErrors: x.rowErrors || [], st: x.st || { received: i.received, extracted: i.received, mapped: i.normalized, normalized: i.normalized, validated: i.validated }, ms: x.ms || { extract: 0, normalize: 0, resolve: 0 }, recIds: [], raw_key: i.raw_key }; });
+  t.imports = d.imports.map(i => { const x = parse(i.data_json, {}); return { id: i.id, sourceId: i.source_id, fileName: i.file_name, fileHash: i.file_hash, format: i.format, encoding: i.encoding, bytes: i.bytes, version: i.version, at: i.at, actor: i.actor, status: i.status, mapping: x.mapping || {}, total: i.total, cursor: x.cursor || i.total, parseErrors: x.parseErrors || [], rowErrors: x.rowErrors || [], st: x.st || { received: i.received, extracted: i.received, mapped: i.normalized, normalized: i.normalized, validated: i.validated }, ms: x.ms || { extract: 0, normalize: 0, resolve: 0 }, recIds: [], raw_key: i.raw_key, provenance: parse(i.provenance_json, null), raw_sha256: i.raw_sha256, ai_analysis_id: i.ai_analysis_id, decision: parse(i.decision_json, null) }; });
   d.decisions.forEach(x => { t.decisions[x.kind][x.pair_key] = { at: x.at, actor: x.actor }; });
   d.mappings.forEach(m => { t.mappings[m.sig] = { map: parse(m.map_json, {}), at: m.at, used: m.used, fileName: m.file_name }; });
   t.snapshots = d.snapshots.map(s => ({ id: s.id, at: s.at, import_id: s.import_id, records: s.records, entities: s.entities, dqi: s.dqi, completeness: s.completeness, confidence: s.confidence }));
@@ -154,7 +154,7 @@ async function loadTenant(id, role, onProgress) {
   let after = '', got = 0;
   while (true) {
     const r = await call('GET', '/t/' + encodeURIComponent(id) + '/records?limit=5000&after=' + encodeURIComponent(after));
-    for (const x of r.rows) { const p = parse(x.payload_json, {}); t.records.push({ id: x.id, source_id: x.source_id, import_id: x.import_id, row: x.row_num, f: p.f || {}, flags: p.flags || null, observed_at: x.observed_at, type: x.entity_type }); }
+    for (const x of r.rows) { const p = parse(x.payload_json, {}); t.records.push({ id: x.id, source_id: x.source_id, import_id: x.import_id, row: x.row_num, f: p.f || {}, flags: p.flags || null, origin: p.origin || null, observed_at: x.observed_at, type: x.entity_type }); }
     got += r.rows.length; if (onProgress) onProgress(got, d.records);
     if (!r.next) break; after = r.next;
   }
@@ -183,7 +183,7 @@ root.CXSync = {
   members: tid => call('GET', '/t/' + encodeURIComponent(tid) + '/members').then(r => r.members),
   setMember: (tid, email, role) => call('POST', '/t/' + encodeURIComponent(tid) + '/members', { email, role }),
   removeMember: (tid, email) => call('DELETE', '/t/' + encodeURIComponent(tid) + '/members/' + encodeURIComponent(email)),
-  uploadRaw: (tid, imp, name, bytes) => call('POST', '/t/' + encodeURIComponent(tid) + '/raw?import=' + encodeURIComponent(imp) + '&name=' + encodeURIComponent(name), undefined, bytes),
+  registerFile: (tid, q, bytes) => call('POST', '/t/' + encodeURIComponent(tid) + '/raw?' + Object.entries(q).map(([k, v]) => k + '=' + encodeURIComponent(typeof v === 'string' ? v : JSON.stringify(v))).join('&'), undefined, bytes),
   connectors: tid => call('GET', '/t/' + encodeURIComponent(tid) + '/connectors'),
   createConnector: (tid, body) => call('POST', '/t/' + encodeURIComponent(tid) + '/connectors', body),
   connectorAction: (tid, cid, action, body) => call('POST', '/t/' + encodeURIComponent(tid) + '/connectors/' + encodeURIComponent(cid) + '/' + action, body || {}),

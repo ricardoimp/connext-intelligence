@@ -57,6 +57,13 @@ npx wrangler dev --var DEV_USER:admin@teste.local --var BOOTSTRAP_ADMINS:admin@t
 - **Conexões:** webhook em `https://ingest.connextintelligence.com/in/{organização}/{conector}` (chave Bearer), Google Sheets (conta de serviço), HubSpot (token de app privado, incremental), Salesforce (client credentials, incremental), PostgreSQL e MySQL (SELECT somente leitura, coluna incremental opcional). Sincronização agendada a cada 15 minutos (cron).
 - **Orçamento:** limite mensal em US$ por organização; o servidor bloqueia chamadas acima dele. Consumo em `agent_executions`.
 
+## Regras de entrada de arquivos (v0.4)
+
+1. **Análise obrigatória pelo Claude:** todo arquivo enviado é analisado automaticamente antes de gravar. O Claude recomenda importar, importar com ressalvas, revisar antes ou não importar, faz até 4 perguntas e aponta qual fonte cadastrada parece ser a origem. A pessoa decide.
+2. **Fonte obrigatória e tag de origem:** cada registro grava `origin` (fonte, importação, arquivo, canal, quem enviou, IP, quando) e aparece no Lead 360 em "Origem dos dados".
+3. **Comprovante de origem:** antes de qualquer registro ser gravado, o servidor recebe o arquivo, guarda o original no R2, calcula o SHA-256 e registra IP, cidade, região, país, CEP e coordenadas aproximados, provedor (ASN), datacenter Cloudflare, navegador, usuário, data, hora (Brasília), carimbo ISO UTC e epoch, fonte, base legal, id da análise da IA e a decisão. Webhooks e conexões recebem comprovante equivalente.
+4. **Bloqueio no servidor:** importações sem comprovante e análise da IA, e registros ligados a elas, são recusados na sincronização.
+
 ### Segredos do Worker (configurados no painel da Cloudflare)
 | Nome | Conteúdo |
 |---|---|
