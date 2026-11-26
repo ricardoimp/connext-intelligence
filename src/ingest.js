@@ -19,7 +19,9 @@ export async function serverImport(env, tid, conn, data, label, actor, extra) {
   // mapeamento: aprovado pelo usuário quando existir, senão o sugerido pelas regras
   let byHeader = null; try { byHeader = conn.mapping_json ? JSON.parse(conn.mapping_json) : null; } catch (e) { byHeader = null; }
   const sug = CX.suggestMapping(null, data.headers, data.rows), mapping = {}, headerMap = {};
-  sug.cols.forEach(c => { const f = byHeader && c.header in byHeader ? byHeader[c.header] : (c.confidence >= 0.6 ? c.field : null); if (f && !c.sensitive) mapping[c.col] = f; headerMap[c.header] = f || null; });
+  // com mapeamento aprovado, só entra o que foi aprovado; colunas novas na origem ficam fora e são avisadas
+  const novas = [];
+  sug.cols.forEach(c => { const f = byHeader ? (c.header in byHeader ? byHeader[c.header] : (novas.push(c.header), null)) : (c.confidence >= 0.6 ? c.field : null); if (f && !c.sensitive) mapping[c.col] = f; headerMap[c.header] = f || null; });
   if (!Object.keys(mapping).length) throw Object.assign(new Error('Nenhuma coluna mapeada para o modelo canônico. Revise o mapeamento do conector.'), { status: 422 });
 
   const t = CX.newTenant(tid, tid); t.salt = tenant.salt; t.seq = tenant.seq || 0; t.idp = 'srv' + rid() + '_'; t.sources = [src];
@@ -39,5 +41,5 @@ export async function serverImport(env, tid, conn, data, label, actor, extra) {
   stmts.push(env.DB.prepare('INSERT INTO workflow_executions (tenant_id, id, kind, trigger, ref, at, state, attempts, ms, cost, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?)').bind(tid, 'wf_' + t.idp + '1', 'Importação por conector', conn.type === 'webhook' ? 'Novo registro recebido' : 'Sincronização agendada', job.id, now, 'concluído', 1, job.ms.normalize, 0, job.st.normalized + ' registros de ' + conn.name));
   stmts.push(env.DB.prepare('INSERT INTO audit_events (tenant_id, id, at, actor, action, detail, ref) VALUES (?,?,?,?,?,?,?)').bind(tid, 'srv_' + t.idp + 'imp', now, actor, 'importacao_concluida', job.id + ' · ' + job.st.normalized + ' registros · ' + conn.name, conn.id));
   for (let i = 0; i < stmts.length; i += 90) await env.DB.batch(stmts.slice(i, i + 90));
-  return { import_id: job.id, records: job.st.normalized, row_errors: job.rowErrors.length };
+  return { import_id: job.id, records: job.st.normalized, row_errors: job.rowErrors.length, colunas_novas_fora_do_mapeamento: novas };
 }

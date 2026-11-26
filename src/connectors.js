@@ -102,7 +102,7 @@ async function apiRest(cfg, secret, cursor, maxPages, sample) {
   if (base.protocol !== 'https:') throw Object.assign(new Error('Use um endpoint https.'), { status: 400 });
   const size = sample ? 20 : Math.max(1, Math.min(1000, +cfg.page_size || 500)), listPath = cfg.records_path || 'dados', upd = cfg.updated_field || 'updated_at', idf = cfg.id_field || 'id';
   let pos = null; try { pos = cursor ? JSON.parse(cursor) : null; } catch (e) { pos = null; }
-  const objs = []; let pages = 0, more = false, last = null, meta = {};
+  const objs = [], seen = new Set(); let pages = 0, more = false, last = null, meta = {};
   while (true) {
     const u = new URL(base); u.searchParams.set('limite', String(size));
     if (pos && typeof pos === 'object') for (const k in pos) if (pos[k] != null && pos[k] !== '') u.searchParams.set(k, String(pos[k]));
@@ -110,7 +110,8 @@ async function apiRest(cfg, secret, cursor, maxPages, sample) {
     const list = Array.isArray(j) ? j : pick(j, listPath);
     if (!Array.isArray(list)) throw Object.assign(new Error('A resposta não tem a lista "' + listPath + '". Ajuste o campo da lista de registros.'), { status: 502 });
     if (!pages && j && typeof j === 'object') meta = { proprietario: j.proprietario || null, fonte: j.fonte || null, gerado_em: j.gerado_em || null };
-    list.forEach(o => objs.push(o)); if (list.length) last = list[list.length - 1]; pages++;
+    // a API repete o registro da posição atual no início da página seguinte: descarta para não duplicar
+    list.forEach(o => { if (pos && o && o[idf] === pos.cursor && String(o[upd]) === String(pos.desde)) return; if (seen.has(o[idf] + '|' + o[upd])) return; seen.add(o[idf] + '|' + o[upd]); objs.push(o); }); if (list.length) last = list[list.length - 1]; pages++;
     const nx = j && (j.proximo_cursor || j.next_cursor || null);
     if (sample) break;
     if (nx && typeof nx === 'object' && JSON.stringify(nx) !== JSON.stringify(pos) && list.length) { pos = nx; if (pages >= maxPages) { more = true; break; } continue; }
