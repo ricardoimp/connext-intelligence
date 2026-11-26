@@ -455,7 +455,7 @@ async function runImportInner(t, im, headerMap) {
     try {
       const r = await CXSync.registerFile(t.id, { import: b.job.id, name: im.name, source: im.sourceId, analysis: im.ai.id, hash: im.parsed.fileHash, decision: { recomendacao: im.ai.recommendation.action, escolha: im.decision || 'importar', mapeamento: im.mapping, consolidacao: consol } }, im.bytes || new TextEncoder().encode(JSON.stringify(im.parsed.rows)), (i, n) => toast('Arquivo original: parte ' + i + ' de ' + n + ' enviada.'));
       b.job.provenance = r.provenance; b.job.raw_key = r.key; b.job.raw_sha256 = r.provenance.sha256; b.job.ai_analysis_id = im.ai.id; b.job.origin.ip = r.provenance.ip; b.job.decision = { recomendacao: im.ai.recommendation.action, escolha: im.decision || 'importar', por: S.me };
-    } catch (e) { CX.cancelImport(t, b.job, actor()); t.imports.splice(t.imports.indexOf(b.job), 1); return toast('Importação não iniciada: ' + e.message, true); }
+    } catch (e) { CX.cancelImport(t, b.job, actor()); t.imports.splice(t.imports.indexOf(b.job), 1); return toast('Importação não iniciada: ' + (e.status === 413 ? 'arquivo maior que o limite de um envio. Recarregue a página (Cmd+Shift+R): a versão atual envia arquivos grandes em partes.' : e.message), true); }
   }
   // colunas mapeadas para campo novo: a definição do campo é criada na base antes de gravar os valores
   const created = []; im.sug.cols.forEach(c => { const k = im.mapping[c.col]; if (isNewField(t, k)) created.push(CX.addCustomField(t, dispName(t, c, im.names, im.mapping), actor(), { k, column: c.header, samples: im.parsed.rows.slice(0, 200).map(r => r[c.col]), source_id: im.sourceId, import_id: b.job.id }).label); });
@@ -843,6 +843,14 @@ async function pullLoop() {
   }
 }
 setInterval(pullLoop, 30000);
+/* ---------- versão nova publicada: avisa para recarregar (aba aberta antes da atualização roda código antigo) ---------- */
+const VER = {};
+async function verSig() { const out = []; for (const f of ['app.js', 'sync.js', 'engine.js']) { try { const r = await fetch(f, { method: 'HEAD', cache: 'no-store' }); out.push(r.headers.get('etag') || ''); } catch (e) { return null; } } return out.join('|'); }
+async function checkVersion() {
+  const v = await verSig(); if (!v) return; if (!VER.base) { VER.base = v; return; }
+  if (v !== VER.base && !VER.shown) { VER.shown = true; const d = document.createElement('div'); d.id = 'newver'; d.innerHTML = '<b>Há uma versão nova da plataforma.</b> <span>Recarregue para usar as correções mais recentes.</span> <button class="btn pri sm" id="newver-go">Atualizar agora</button>'; document.body.appendChild(d); $('#newver-go').onclick = () => { if (S.run || S.importing) return toast('Aguarde a importação terminar para atualizar.', true); location.reload(); }; }
+}
+checkVersion(); setInterval(checkVersion, 120000); document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkVersion(); });
 async function reloadTenant(quiet) {
   const t = T(); if (!t.remote) return;
   if (S.syncing || syncTimer) { await new Promise(r => setTimeout(r, 1500)); }
